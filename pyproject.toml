@@ -7,7 +7,9 @@ name = "infinity-forge"
 version = "0.1.0"
 description = "∞ Forge: a self-compounding verified Python function library"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "radon>=6.0,<7.0",
+]
 
 [project.optional-dependencies]
 dev = [
