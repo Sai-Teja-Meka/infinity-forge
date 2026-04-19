@@ -9,158 +9,166 @@ consumes gigabytes of RAM.
 `extract_code` pulls the first Python function definition out of raw generator
 output, handling three common shapes (```python fenced, ``` fenced, bare).
 """
-
 from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any
+from abc import ABC, abstractmethod
 
 
-class Generator:
-    """Abstract text generator."""
-
+class Generator(ABC):
+    @abstractmethod
     def generate(self, prompt: str, temperature: float) -> str:
-        raise NotImplementedError
+        ...
 
 
 class MockGenerator(Generator):
-    """Returns canned responses keyed by the hash of the incoming prompt.
-
-    `responses` is a mapping from prompt-hash (hex SHA-256, first 16 chars)
-    to the string to return. If a prompt isn't in the map, the `default`
-    response is used. Used exclusively for tests.
-    """
+    """Canned responses keyed by SHA-256 prompt hash. Used in all tests."""
 
     def __init__(
         self,
         responses: dict[str, str] | None = None,
         default: str = "",
         sequence: list[str] | None = None,
-    ) -> None:
-        self.responses: dict[str, str] = dict(responses or {})
-        self.default: str = default
-        self.sequence: list[str] | None = list(sequence) if sequence is not None else None
-        self.sequence_index: int = 0
+    ):
+        self._responses = responses or {}
+        self._default = default
+        self._sequence = list(sequence) if sequence is not None else None
+        self._sequence_idx = 0
         self.calls: list[tuple[str, float]] = []
-
-    @staticmethod
-    def prompt_key(prompt: str) -> str:
-        return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
-
-    def set(self, prompt: str, response: str) -> None:
-        self.responses[self.prompt_key(prompt)] = response
 
     def generate(self, prompt: str, temperature: float) -> str:
         self.calls.append((prompt, temperature))
-        if self.sequence is not None:
-            if self.sequence_index < len(self.sequence):
-                out = self.sequence[self.sequence_index]
-                self.sequence_index += 1
-                return out
-            return self.default
-        return self.responses.get(self.prompt_key(prompt), self.default)
-
-
-_FENCED_PYTHON_RE = re.compile(r"```python\s*\n(.*?)```", re.DOTALL)
-_FENCED_ANY_RE = re.compile(r"```\s*\n(.*?)```", re.DOTALL)
-_BARE_DEF_RE = re.compile(r"(?ms)^(def\s+f\s*\(.*)")
-
-
-def _find_function_in(text: str) -> str | None:
-    """Return the first `def f(...)` block in `text`, trimmed, or None."""
-    match = _BARE_DEF_RE.search(text)
-    if not match:
-        return None
-    start = match.start()
-    lines = text[start:].splitlines()
-    collected: list[str] = [lines[0]]
-    for line in lines[1:]:
-        if line.strip() == "":
-            collected.append(line)
-            continue
-        # Continuation: either indented, or part of the def signature
-        # (closing paren / return annotation on its own line).
-        if line.startswith((" ", "\t")):
-            collected.append(line)
-        else:
-            break
-    # Strip trailing blank lines
-    while collected and collected[-1].strip() == "":
-        collected.pop()
-    body = "\n".join(collected)
-    return body if body else None
-
-
-def extract_code(raw: str) -> str | None:
-    """Extract the first Python `def f(...)` function from a raw generation.
-
-    Checks, in order: a ```python fenced block, a ``` fenced block, then a
-    bare `def f(...)` in the text. Returns the function source as a string,
-    or None if nothing recognizable was produced.
-    """
-    if not raw:
-        return None
-
-    for pattern in (_FENCED_PYTHON_RE, _FENCED_ANY_RE):
-        for m in pattern.finditer(raw):
-            body = m.group(1)
-            fn = _find_function_in(body)
-            if fn is not None:
-                return fn
-
-    return _find_function_in(raw)
+        if self._sequence is not None:
+            if self._sequence_idx >= len(self._sequence):
+                return self._default
+            out = self._sequence[self._sequence_idx]
+            self._sequence_idx += 1
+            return out
+        key = hashlib.sha256(prompt.encode()).hexdigest()
+        return self._responses.get(key, self._default)
 
 
 class QwenGenerator(Generator):
-    """Loads Qwen3-1.7B via transformers pipeline on first generate() call.
+    """Loads Qwen3-1.7B via transformers on first generate() call.
 
-    Lazy-loads so importing this module (including during test collection)
-    does not touch the model. Device selection is automatic: CUDA if
-    available, else CPU. Loading prints the selected device so Colab runs
-    confirm GPU usage visually.
+    Qwen3 is a unified instruction + thinking model (not a base model). It
+    expects chat-template-formatted input, not raw completion-style prompts.
+    We use non-thinking mode for generation (enable_thinking=False) since
+    we want direct code output, not reasoning traces.
 
-    Never instantiate from tests.
+    Per the Qwen3 model card, presence_penalty=1.5 is recommended to prevent
+    endless repetitions at small scale.
     """
 
     MODEL_ID: str = "Qwen/Qwen3-1.7B"
 
     def __init__(self) -> None:
-        self._pipeline: Any | None = None
+        self._model = None
+        self._tokenizer = None
         self._device: str | None = None
 
     def _load(self) -> None:
-        if self._pipeline is not None:
+        if self._model is not None:
             return
-        import torch  # type: ignore
-        from transformers import pipeline  # type: ignore
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        if torch.cuda.is_available():
-            device = "cuda:0"
-            torch_dtype = torch.float16
-        else:
-            device = "cpu"
-            torch_dtype = torch.float32
+        self._device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        print(f"QwenGenerator: using device={self._device}")
 
-        print(f"QwenGenerator: using device={device}")
-
-        self._pipeline = pipeline(
-            task="text-generation",
-            model=self.MODEL_ID,
-            torch_dtype=torch_dtype,
-            device=device,
+        self._tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
+        self._model = AutoModelForCausalLM.from_pretrained(
+            self.MODEL_ID,
+            torch_dtype="auto",
+            device_map=self._device,
         )
-        self._device = device
 
     def generate(self, prompt: str, temperature: float) -> str:
         self._load()
-        assert self._pipeline is not None
-        out = self._pipeline(
-            prompt,
-            max_new_tokens=400,
-            do_sample=True,
-            temperature=temperature,
-            top_p=0.95,
-            return_full_text=False,
+        import torch
+
+        messages = [{"role": "user", "content": prompt}]
+        text = self._tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
         )
-        return out[0]["generated_text"]
+        inputs = self._tokenizer([text], return_tensors="pt").to(self._device)
+
+        with torch.no_grad():
+            output_ids = self._model.generate(
+                **inputs,
+                max_new_tokens=400,
+                do_sample=True,
+                temperature=temperature,
+                top_p=0.95,
+                repetition_penalty=1.2,
+                pad_token_id=self._tokenizer.eos_token_id,
+            )
+
+        generated = output_ids[0][inputs["input_ids"].shape[-1]:]
+        return self._tokenizer.decode(generated, skip_special_tokens=True)
+
+
+_FENCED_PYTHON = re.compile(r"```python\s*\n(.*?)```", re.DOTALL)
+_FENCED_BARE = re.compile(r"```\s*\n(.*?)```", re.DOTALL)
+
+
+def extract_code(raw: str) -> str | None:
+    """Pull the first Python function definition out of raw generator output.
+
+    Tries in order: ```python fenced block, ``` fenced block, bare `def f(...)`.
+    Returns None if no function definition can be recovered.
+    """
+    m = _FENCED_PYTHON.search(raw)
+    if m:
+        candidate = m.group(1).strip()
+        if _looks_like_function(candidate):
+            return candidate
+
+    m = _FENCED_BARE.search(raw)
+    if m:
+        candidate = m.group(1).strip()
+        if _looks_like_function(candidate):
+            return candidate
+
+    return _extract_bare(raw)
+
+
+def _looks_like_function(text: str) -> bool:
+    for line in text.splitlines():
+        if line.lstrip().startswith("def "):
+            return True
+    return False
+
+
+def _extract_bare(raw: str) -> str | None:
+    lines = raw.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("def "):
+            start = i
+            break
+    if start is None:
+        return None
+
+    collected = [lines[start]]
+    for line in lines[start + 1:]:
+        stripped = line.strip()
+        if stripped == "":
+            collected.append(line)
+            continue
+        if line[:1] in (" ", "\t"):
+            collected.append(line)
+            continue
+        break
+
+    while collected and collected[-1].strip() == "":
+        collected.pop()
+
+    source = "\n".join(collected)
+    if not source.strip():
+        return None
+    return source
