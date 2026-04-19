@@ -1,9 +1,24 @@
-"""Day 3 generator loop.
+"""Generator loop with Day 4 additions: seeds, Layer 6, fingerprint-diverse few-shot.
 
 Prompt a text generator for candidate Python atoms, run each candidate
-through the cascade ``gate``, and append every outcome as a line of JSON to
-``log_path``. The loop is resumable (picks up from the max iteration already
-in the file) and observable (prints a status line every 25 iterations).
+through the cascade ``gate``, run accepted atoms through Layer 6 (behavioral
+fingerprinting), and append every outcome as a line of JSON to ``log_path``.
+
+Day 4 additions:
+  * On fresh run (``log_path`` does not exist), inject :data:`seeds.SEED_ATOMS`
+    at iterations ``-1, -2, -3, ...`` before the first generator iteration.
+    Each seed computes its own fingerprint and appends to the fingerprint
+    index side file.
+  * After :func:`cascade.gate` accepts, compute the fingerprint and run
+    novelty/type checks. Rejections at this stage override ``gate_result``
+    with ``stage="layer_6"`` (type mismatch) or ``stage="novelty"`` (duplicate).
+  * Few-shot selection pulls up to 3 accepted atoms per signature with
+    **distinct fingerprints**, newest first, so the example pool cannot
+    degenerate into three copies of the same atom.
+
+The loop remains resumable (picks up from the max iteration already in the
+file — seeds have negative iterations, so they are always "before" the
+generator iterations and do not re-inject on resume).
 """
 
 from __future__ import annotations
@@ -17,7 +32,17 @@ from typing import Any
 from infinity_forge.cascade import Result, gate
 from infinity_forge.generator import Generator, extract_code
 from infinity_forge.inputs import sample_input
+from infinity_forge.novelty import (
+    Fingerprint,
+    append_to_index,
+    compute_fingerprint,
+    index_key,
+    is_novel,
+    load_index,
+)
+from infinity_forge.probes import EXPECTED_OUTPUT_TYPES
 from infinity_forge.prompts import build_prompt
+from infinity_forge.seeds import SEED_ATOMS
 from infinity_forge.signatures import ACTIVE_SIGNATURES
 
 _TEMPERATURES: tuple[float, ...] = (0.7, 0.9, 1.1)
@@ -34,6 +59,7 @@ class IterationResult:
     extracted_source: str | None
     input_value: Any
     gate_result: Result | None
+    fingerprint: Fingerprint | None
     timestamp: str
 
     def to_json_line(self) -> str:
@@ -46,17 +72,58 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _read_existing(log_path: Path) -> tuple[int, dict[tuple[str, str], list[str]]]:
-    """Return (next_iteration_index, accepted_atoms_by_signature) from log_path.
+def _fingerprint_index_path(log_path: Path) -> Path:
+    """Index side-file path derived from the log path.
 
-    If the file does not exist or is empty, returns (0, {}).
-    Lines that fail to parse are skipped.
+    For ``forge.jsonl`` this yields ``forge.fingerprints.jsonl`` alongside.
+    """
+    return log_path.with_name(log_path.stem + ".fingerprints.jsonl")
+
+
+def _first_bad_type_probe_index(fingerprint: Fingerprint) -> int | None:
+    for i, slot in enumerate(fingerprint):
+        if slot == "__bad_output_type__":
+            return i
+    return None
+
+
+def _pick_few_shot(
+    pool: list[tuple[str, Fingerprint]],
+    k: int = 3,
+) -> list[str]:
+    """Pick up to k atoms from ``pool`` with distinct fingerprints, newest first."""
+    seen: set[str] = set()
+    picked: list[str] = []
+    for source, fp in reversed(pool):
+        fp_key = json.dumps(fp, separators=(",", ":"))
+        if fp_key in seen:
+            continue
+        seen.add(fp_key)
+        picked.append(source)
+        if len(picked) >= k:
+            break
+    return picked
+
+
+def _read_existing(
+    log_path: Path,
+) -> tuple[int, dict[tuple[str, str], list[tuple[str, Fingerprint]]]]:
+    """Return (next_iteration_index, accepted_by_sig) from log_path.
+
+    ``accepted_by_sig`` is ``{sig: [(source, fingerprint), ...]}`` in insertion
+    order (oldest first). Entries missing a fingerprint are skipped from the
+    few-shot pool — they remain in the log but cannot participate in the
+    distinct-fingerprint few-shot selection.
+
+    Seed entries (negative iteration) ARE included in ``accepted_by_sig`` so
+    few-shot can pull from them. They do NOT influence ``next_iteration_index``,
+    which considers non-negative iterations only.
     """
     if not log_path.exists():
         return 0, {}
 
     max_iter = -1
-    accepted: dict[tuple[str, str], list[str]] = {}
+    accepted: dict[tuple[str, str], list[tuple[str, Fingerprint]]] = {}
     with log_path.open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -67,21 +134,60 @@ def _read_existing(log_path: Path) -> tuple[int, dict[tuple[str, str], list[str]
             except json.JSONDecodeError:
                 continue
             it = rec.get("iteration")
-            if isinstance(it, int) and it > max_iter:
+            if isinstance(it, int) and it >= 0 and it > max_iter:
                 max_iter = it
             sig = rec.get("signature")
             gr = rec.get("gate_result")
             src = rec.get("extracted_source")
+            fp = rec.get("fingerprint")
             if (
                 isinstance(sig, list)
                 and len(sig) == 2
                 and isinstance(gr, dict)
                 and gr.get("accepted") is True
                 and isinstance(src, str)
+                and isinstance(fp, list)
             ):
                 key = (sig[0], sig[1])
-                accepted.setdefault(key, []).append(src)
+                accepted.setdefault(key, []).append((src, list(fp)))
     return max_iter + 1, accepted
+
+
+def _inject_seeds(
+    log_fh,
+    log_path: Path,
+    fp_index_path: Path,
+    fp_index: dict[str, tuple[str, int]],
+    accepted_by_sig: dict[tuple[str, str], list[tuple[str, Fingerprint]]],
+) -> None:
+    """Write each seed atom to the log + fingerprint index. Iterations are -1, -2, ..."""
+    for i, seed in enumerate(SEED_ATOMS):
+        iteration = -(i + 1)
+        sig = tuple(seed["signature"])
+        source = seed["source"]
+        input_value = sample_input(sig[0], seed=0)
+        gate_result = gate(source, input_value)
+        fingerprint = compute_fingerprint(source, sig)
+
+        record = IterationResult(
+            iteration=iteration,
+            signature=sig,
+            temperature=0.0,
+            raw_llm_output=seed.get("note", ""),
+            extracted_source=source,
+            input_value=input_value,
+            gate_result=gate_result,
+            fingerprint=fingerprint,
+            timestamp=_now_iso(),
+        )
+        log_fh.write(record.to_json_line())
+        log_fh.write("\n")
+        log_fh.flush()
+
+        key = index_key(sig, fingerprint)
+        append_to_index(fp_index_path, key, source, iteration)
+        fp_index[key] = (source, iteration)
+        accepted_by_sig.setdefault(sig, []).append((source, fingerprint))
 
 
 def _print_status(
@@ -100,7 +206,9 @@ def _print_status(
         f"extract_fail={totals['extract_fail']} "
         f"layer1={totals['reject_layer_1']} "
         f"layer2={totals['reject_layer_2']} "
-        f"sandbox={totals['reject_sandbox']}",
+        f"sandbox={totals['reject_sandbox']} "
+        f"l6type={totals['reject_layer_6']} "
+        f"novelty={totals['reject_novelty']}",
         flush=True,
     )
 
@@ -114,9 +222,10 @@ def run(
 ) -> None:
     """Run the forge for ``n_iterations`` iterations, appending to ``log_path``.
 
-    See module docstring for semantics. The function prints status every
-    25 iterations and re-raises any unhandled exception after flushing
-    whatever was written so far.
+    On fresh run (``log_path`` does not yet exist), seeds from
+    :data:`seeds.SEED_ATOMS` are injected with negative iteration numbers
+    before the first generator iteration. Each accepted atom goes through
+    the full Day 4 pipeline: cascade → sandbox → Layer 6 (type + novelty).
     """
     sigs = list(active_signatures) if active_signatures is not None else list(ACTIVE_SIGNATURES)
     if not sigs:
@@ -124,11 +233,16 @@ def run(
 
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    fp_index_path = _fingerprint_index_path(log_path)
+
+    fresh_run = not log_path.exists()
 
     if resume:
         start, accepted_by_sig = _read_existing(log_path)
     else:
         start, accepted_by_sig = 0, {}
+
+    fp_index = load_index(fp_index_path)
 
     totals = {
         "gate_ran": 0,
@@ -137,16 +251,25 @@ def run(
         "reject_layer_1": 0,
         "reject_layer_2": 0,
         "reject_sandbox": 0,
+        "reject_layer_6": 0,
+        "reject_novelty": 0,
     }
 
     end = start + n_iterations
     with log_path.open("a", encoding="utf-8") as fh:
+        if fresh_run:
+            _inject_seeds(fh, log_path, fp_index_path, fp_index, accepted_by_sig)
+
         for i in range(start, end):
             sig = sigs[i % len(sigs)]
             temperature = _TEMPERATURES[i % len(_TEMPERATURES)]
 
-            few_shot_pool = accepted_by_sig.get(sig, [])
-            few_shot = few_shot_pool[:3] if len(few_shot_pool) >= _FEW_SHOT_THRESHOLD else None
+            pool = accepted_by_sig.get(sig, [])
+            few_shot = (
+                _pick_few_shot(pool, k=3)
+                if len(pool) >= _FEW_SHOT_THRESHOLD
+                else None
+            )
 
             prompt = build_prompt(sig[0], sig[1], few_shot_atoms=few_shot)
             raw = generator.generate(prompt, temperature)
@@ -154,15 +277,58 @@ def run(
 
             input_value: Any = None
             gate_result: Result | None = None
+            fingerprint: Fingerprint | None = None
+
             if source is None:
                 totals["extract_fail"] += 1
             else:
                 input_value = sample_input(sig[0], seed=i)
                 gate_result = gate(source, input_value)
                 totals["gate_ran"] += 1
+
                 if gate_result["accepted"]:
-                    totals["accepted"] += 1
-                    accepted_by_sig.setdefault(sig, []).append(source)
+                    fingerprint = compute_fingerprint(source, sig)
+                    bad_idx = _first_bad_type_probe_index(fingerprint)
+                    if bad_idx is not None:
+                        expected = EXPECTED_OUTPUT_TYPES[sig[1]].__name__
+                        gate_result = Result(
+                            accepted=False,
+                            stage="layer_6",
+                            reason=(
+                                f"layer_6: output type mismatch on probe[{bad_idx}]: "
+                                f"expected {expected}"
+                            ),
+                            value=gate_result.get("value"),
+                            duration_ms=gate_result.get("duration_ms"),
+                            metadata={**gate_result.get("metadata", {}), "layer_6_reject": "type"},
+                        )
+                        totals["reject_layer_6"] += 1
+                    else:
+                        novel, existing_source = is_novel(fingerprint, fp_index, sig)
+                        if not novel:
+                            key = index_key(sig, fingerprint)
+                            existing_iter = fp_index[key][1]
+                            gate_result = Result(
+                                accepted=False,
+                                stage="novelty",
+                                reason=f"layer_6: duplicate of atom from iteration {existing_iter}",
+                                value=gate_result.get("value"),
+                                duration_ms=gate_result.get("duration_ms"),
+                                metadata={
+                                    **gate_result.get("metadata", {}),
+                                    "layer_6_reject": "duplicate",
+                                    "duplicate_of_iteration": existing_iter,
+                                },
+                            )
+                            totals["reject_novelty"] += 1
+                        else:
+                            totals["accepted"] += 1
+                            key = index_key(sig, fingerprint)
+                            append_to_index(fp_index_path, key, source, i)
+                            fp_index[key] = (source, i)
+                            accepted_by_sig.setdefault(sig, []).append(
+                                (source, fingerprint)
+                            )
                 else:
                     stage = gate_result["stage"]
                     if stage == "layer_1":
@@ -180,6 +346,7 @@ def run(
                 extracted_source=source,
                 input_value=input_value,
                 gate_result=gate_result,
+                fingerprint=fingerprint,
                 timestamp=_now_iso(),
             )
             fh.write(record.to_json_line())

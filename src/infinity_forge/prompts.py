@@ -25,6 +25,7 @@ def build_prompt(
         "Write a pure Python function named `f`.",
         f"It takes exactly one positional argument: {input_desc} ({input_type}).",
         f"It returns {output_desc} ({output_type}).",
+        "The input is guaranteed to match the declared type. Do not validate or check the input — write the function body assuming correct input.",
         f"Allowed builtins only: {_BUILTIN_LIST}.",
         "No imports. No docstrings. No comments. No explanation.",
         "Maximum 30 lines. Cyclomatic complexity at most 10.",

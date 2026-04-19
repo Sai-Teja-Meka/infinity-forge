@@ -88,6 +88,29 @@ def test_prompt_mentions_one_positional_argument():
     assert "one positional" in p.lower()
 
 
+def test_prompt_tells_model_not_to_validate_input():
+    p = build_prompt("int", "int")
+    assert (
+        "The input is guaranteed to match the declared type. "
+        "Do not validate or check the input — write the function body "
+        "assuming correct input."
+    ) in p
+
+
+def test_no_validate_sentence_appears_before_constraint_list():
+    p = build_prompt("list[int]", "bool")
+    no_validate_idx = p.index("Do not validate")
+    builtins_idx = p.index("Allowed builtins only")
+    assert no_validate_idx < builtins_idx
+
+
+def test_no_validate_sentence_appears_after_return_type_line():
+    p = build_prompt("int", "int")
+    returns_idx = p.index("It returns")
+    no_validate_idx = p.index("Do not validate")
+    assert returns_idx < no_validate_idx
+
+
 @pytest.mark.parametrize("inp,out", ACTIVE_SIGNATURES)
 def test_prompt_builds_for_every_active_signature(inp, out):
     p = build_prompt(inp, out)
