@@ -37,6 +37,15 @@ class MockGenerator(Generator):
         self._sequence_idx = 0
         self.calls: list[tuple[str, float]] = []
 
+    @staticmethod
+    def prompt_key(prompt: str) -> str:
+        """First 16 hex chars of SHA-256(prompt), used as the dict key."""
+        return hashlib.sha256(prompt.encode()).hexdigest()[:16]
+
+    def set(self, prompt: str, response: str) -> None:
+        """Register a canned response for the given prompt."""
+        self._responses[self.prompt_key(prompt)] = response
+
     def generate(self, prompt: str, temperature: float) -> str:
         self.calls.append((prompt, temperature))
         if self._sequence is not None:
@@ -45,7 +54,7 @@ class MockGenerator(Generator):
             out = self._sequence[self._sequence_idx]
             self._sequence_idx += 1
             return out
-        key = hashlib.sha256(prompt.encode()).hexdigest()
+        key = self.prompt_key(prompt)
         return self._responses.get(key, self._default)
 
 
@@ -139,7 +148,8 @@ def extract_code(raw: str) -> str | None:
 
 def _looks_like_function(text: str) -> bool:
     for line in text.splitlines():
-        if line.lstrip().startswith("def "):
+        stripped = line.lstrip()
+        if stripped.startswith("def f(") or stripped.startswith("def f ("):
             return True
     return False
 
@@ -148,7 +158,8 @@ def _extract_bare(raw: str) -> str | None:
     lines = raw.splitlines()
     start = None
     for i, line in enumerate(lines):
-        if line.lstrip().startswith("def "):
+        stripped = line.lstrip()
+        if stripped.startswith("def f(") or stripped.startswith("def f ("):
             start = i
             break
     if start is None:
