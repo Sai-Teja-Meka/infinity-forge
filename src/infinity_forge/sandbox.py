@@ -39,6 +39,21 @@ _NPROC_LIMIT = 1
 _FSIZE_LIMIT = 0
 _POST_KILL_WAIT_S = 0.5
 
+# The set of builtin names the child process makes available to sandboxed
+# functions. This MUST stay byte-for-byte in sync with the _ALLOWED_BUILTINS
+# dict inside _CHILD_SCRIPT below: 26 names (23 callables plus True/False/None).
+# The cascade (Day 2) imports this constant to validate candidate source
+# statically before spawning a subprocess.
+_ALLOWED_BUILTIN_NAMES: frozenset[str] = frozenset({
+    "abs", "min", "max", "sum", "len",
+    "range", "sorted", "reversed",
+    "enumerate", "zip", "map", "filter",
+    "all", "any", "round",
+    "int", "float", "str",
+    "list", "tuple", "dict", "set", "bool",
+    "True", "False", "None",
+})
+
 _CHILD_SCRIPT = r"""
 import sys
 import json
