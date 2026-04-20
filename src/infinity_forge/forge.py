@@ -23,6 +23,7 @@ generator iterations and do not re-inject on resume).
 
 from __future__ import annotations
 
+import csv
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -48,6 +49,25 @@ from infinity_forge.signatures import ACTIVE_SIGNATURES
 _TEMPERATURES: tuple[float, ...] = (0.7, 0.9, 1.1)
 _FEW_SHOT_THRESHOLD: int = 10
 _STATUS_INTERVAL: int = 25
+_PER_SIG_INTERVAL: int = 100
+
+_CSV_HEADER: tuple[str, ...] = (
+    "iteration",
+    "signature_in",
+    "signature_out",
+    "stage",
+    "accepted",
+    "cum_accepted",
+    "cum_dup",
+    "cum_bad",
+    "cum_l1",
+    "cum_l2",
+    "cum_sandbox",
+)
+
+
+def _empty_per_sig_counts() -> dict[str, int]:
+    return {"total": 0, "novel": 0, "dup": 0, "bad": 0, "L2": 0, "sbx": 0}
 
 
 @dataclass
@@ -78,6 +98,25 @@ def _fingerprint_index_path(log_path: Path) -> Path:
     For ``forge.jsonl`` this yields ``forge.fingerprints.jsonl`` alongside.
     """
     return log_path.with_name(log_path.stem + ".fingerprints.jsonl")
+
+
+def _csv_metrics_path(log_path: Path) -> Path:
+    """CSV metrics side-file path. For ``forge.jsonl`` → ``forge.csv``."""
+    return log_path.with_suffix(".csv")
+
+
+def _stage_from_record(
+    extracted_source: str | None,
+    gate_result: Result | None,
+) -> str:
+    """Terminal stage for an iteration, for CSV ``stage`` column."""
+    if extracted_source is None:
+        return "extract_fail"
+    if gate_result is None:
+        return "extract_fail"
+    if gate_result["accepted"]:
+        return "completed"
+    return gate_result["stage"]
 
 
 def _first_bad_type_probe_index(fingerprint: Fingerprint) -> int | None:
@@ -213,6 +252,28 @@ def _print_status(
     )
 
 
+def _print_per_signature(
+    current: int,
+    sigs: list[tuple[str, str]],
+    per_sig: dict[tuple[str, str], dict[str, int]],
+) -> None:
+    label_width = max(len(f"{s[0]} -> {s[1]}") for s in sigs)
+    print(f"[forge] per-signature at iter {current + 1}:", flush=True)
+    for sig in sigs:
+        c = per_sig.get(sig, _empty_per_sig_counts())
+        label = f"{sig[0]} -> {sig[1]}".ljust(label_width)
+        print(
+            f"  {label} : "
+            f"total={c['total']}  "
+            f"novel={c['novel']}  "
+            f"dup={c['dup']}  "
+            f"bad={c['bad']}  "
+            f"L2={c['L2']}  "
+            f"sbx={c['sbx']}",
+            flush=True,
+        )
+
+
 def run(
     generator: Generator,
     log_path: Path,
@@ -234,8 +295,10 @@ def run(
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     fp_index_path = _fingerprint_index_path(log_path)
+    csv_path = _csv_metrics_path(log_path)
 
     fresh_run = not log_path.exists()
+    csv_fresh = not csv_path.exists()
 
     if resume:
         start, accepted_by_sig = _read_existing(log_path)
@@ -243,6 +306,17 @@ def run(
         start, accepted_by_sig = 0, {}
 
     fp_index = load_index(fp_index_path)
+
+    if start > 0:
+        m = sum(len(v) for v in accepted_by_sig.values())
+        k = len(accepted_by_sig)
+        f = len(fp_index)
+        print(
+            f"[forge] resuming from iteration {start}, "
+            f"found {m} accepted atoms across {k} signatures, "
+            f"fingerprint index has {f} entries",
+            flush=True,
+        )
 
     totals = {
         "gate_ran": 0,
@@ -255,8 +329,24 @@ def run(
         "reject_novelty": 0,
     }
 
+    per_sig: dict[tuple[str, str], dict[str, int]] = {
+        s: _empty_per_sig_counts() for s in sigs
+    }
+
     end = start + n_iterations
-    with log_path.open("a", encoding="utf-8") as fh:
+    # CSV cumulatives are running totals from THIS process's start. On resume,
+    # any pre-existing CSV rows from prior runs are preserved as-is, and the
+    # new rows' cum_* columns start at the current-run deltas (beginning at the
+    # first completed iteration of this invocation). Day 5.5 analysis scripts
+    # must detect and stitch these discontinuities by iteration boundary.
+    with log_path.open("a", encoding="utf-8") as fh, csv_path.open(
+        "a", encoding="utf-8", newline=""
+    ) as csv_fh:
+        csv_writer = csv.writer(csv_fh)
+        if csv_fresh:
+            csv_writer.writerow(_CSV_HEADER)
+            csv_fh.flush()
+
         if fresh_run:
             _inject_seeds(fh, log_path, fp_index_path, fp_index, accepted_by_sig)
 
@@ -278,6 +368,9 @@ def run(
             input_value: Any = None
             gate_result: Result | None = None
             fingerprint: Fingerprint | None = None
+
+            sig_counts = per_sig.setdefault(sig, _empty_per_sig_counts())
+            sig_counts["total"] += 1
 
             if source is None:
                 totals["extract_fail"] += 1
@@ -303,6 +396,7 @@ def run(
                             metadata={**gate_result.get("metadata", {}), "layer_6_reject": "type"},
                         )
                         totals["reject_layer_6"] += 1
+                        sig_counts["bad"] += 1
                     else:
                         novel, existing_source = is_novel(fingerprint, fp_index, sig)
                         if not novel:
@@ -321,8 +415,10 @@ def run(
                                 },
                             )
                             totals["reject_novelty"] += 1
+                            sig_counts["dup"] += 1
                         else:
                             totals["accepted"] += 1
+                            sig_counts["novel"] += 1
                             key = index_key(sig, fingerprint)
                             append_to_index(fp_index_path, key, source, i)
                             fp_index[key] = (source, i)
@@ -335,8 +431,10 @@ def run(
                         totals["reject_layer_1"] += 1
                     elif stage == "layer_2":
                         totals["reject_layer_2"] += 1
+                        sig_counts["L2"] += 1
                     elif stage == "sandbox":
                         totals["reject_sandbox"] += 1
+                        sig_counts["sbx"] += 1
 
             record = IterationResult(
                 iteration=i,
@@ -353,5 +451,39 @@ def run(
             fh.write("\n")
             fh.flush()
 
+            stage = _stage_from_record(source, gate_result)
+            accepted_flag = 1 if (gate_result is not None and gate_result["accepted"]) else 0
+            csv_writer.writerow(
+                (
+                    i,
+                    sig[0],
+                    sig[1],
+                    stage,
+                    accepted_flag,
+                    totals["accepted"],
+                    totals["reject_novelty"],
+                    totals["reject_layer_6"],
+                    totals["reject_layer_1"],
+                    totals["reject_layer_2"],
+                    totals["reject_sandbox"],
+                )
+            )
+            csv_fh.flush()
+
             if (i + 1) % _STATUS_INTERVAL == 0:
                 _print_status(start, i, totals)
+
+            if (i + 1) % _PER_SIG_INTERVAL == 0:
+                _print_per_signature(i, sigs, per_sig)
+
+        print(
+            f"[forge] completed {n_iterations} iterations: "
+            f"{totals['accepted']} accepted, "
+            f"{totals['reject_novelty']} duplicates, "
+            f"{totals['reject_layer_6']} bad-type, "
+            f"{totals['reject_layer_1']} layer_1, "
+            f"{totals['reject_layer_2']} layer_2, "
+            f"{totals['reject_sandbox']} sandbox, "
+            f"{totals['extract_fail']} extract_fail",
+            flush=True,
+        )

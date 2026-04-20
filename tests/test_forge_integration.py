@@ -8,6 +8,7 @@ entries by ``iteration >= 0`` when counting generator iterations.
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -200,7 +201,7 @@ def test_status_line_printed_every_25(tmp_path: Path, capsys):
     gen = _make_gen(60)
     run(gen, log, n_iterations=50, resume=False)
     captured = capsys.readouterr().out
-    status_lines = [l for l in captured.splitlines() if l.startswith("[forge]")]
+    status_lines = [l for l in captured.splitlines() if l.startswith("[forge] iter ")]
     assert len(status_lines) == 2
 
 
@@ -209,7 +210,7 @@ def test_status_line_not_printed_below_25(tmp_path: Path, capsys):
     gen = _make_gen(20)
     run(gen, log, n_iterations=20, resume=False)
     captured = capsys.readouterr().out
-    status_lines = [l for l in captured.splitlines() if l.startswith("[forge]")]
+    status_lines = [l for l in captured.splitlines() if l.startswith("[forge] iter ")]
     assert len(status_lines) == 0
 
 
@@ -263,7 +264,7 @@ def test_seeds_written_to_fingerprint_index(tmp_path: Path):
     assert len(lines) >= len(SEED_ATOMS)
 
 
-def test_resume_does_not_reinject_seeds(tmp_path: Path):
+def test_resume_does_not_reinject_seeds(tmp_path: Path, capsys):
     log = tmp_path / "log.jsonl"
     gen = _make_gen(10)
 
@@ -271,12 +272,20 @@ def test_resume_does_not_reinject_seeds(tmp_path: Path):
     seeds_first = _seed_iterations(log)
     assert len(seeds_first) == len(SEED_ATOMS)
 
+    first_out = capsys.readouterr().out
+    assert "resuming from iteration" not in first_out
+    assert "[forge] completed 5 iterations:" in first_out
+
     run(gen, log, n_iterations=5, resume=True)
     seeds_second = _seed_iterations(log)
     assert seeds_second == seeds_first  # byte-for-byte same seed rows
 
     gen_iters = [rec["iteration"] for rec in _gen_iterations(log)]
     assert gen_iters == list(range(10))
+
+    second_out = capsys.readouterr().out
+    assert "[forge] resuming from iteration 5," in second_out
+    assert "[forge] completed 5 iterations:" in second_out
 
 
 def test_duplicate_atom_flagged_as_novelty(tmp_path: Path):
@@ -322,6 +331,58 @@ def test_few_shot_deduplicates_by_fingerprint():
     # Newest-first traversal: E (dup of B), D, C (dup of A), B, A
     # Distinct picks: E (fp=2), D (fp=3), C (fp=1) → three in reverse-insertion order.
     assert picked == ["src_E", "src_D", "src_C"]
+
+
+def test_csv_metrics_has_header_and_monotonic_cumulatives(tmp_path: Path):
+    """10 iterations → CSV with header + 10 rows; cum_* columns non-decreasing."""
+    log = tmp_path / "log.jsonl"
+    gen = _make_gen(10)
+    run(gen, log, n_iterations=10, resume=False)
+
+    csv_path = tmp_path / "log.csv"
+    assert csv_path.exists()
+
+    with csv_path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.reader(fh)
+        rows = list(reader)
+
+    header = rows[0]
+    assert header == [
+        "iteration", "signature_in", "signature_out", "stage", "accepted",
+        "cum_accepted", "cum_dup", "cum_bad", "cum_l1", "cum_l2", "cum_sandbox",
+    ]
+    data = rows[1:]
+    assert len(data) == 10
+
+    cum_cols = ("cum_accepted", "cum_dup", "cum_bad", "cum_l1", "cum_l2", "cum_sandbox")
+    prev = {c: 0 for c in cum_cols}
+    for row in data:
+        rec = dict(zip(header, row))
+        for c in cum_cols:
+            cur = int(rec[c])
+            assert cur >= prev[c], f"{c} decreased: {prev[c]} -> {cur}"
+            prev[c] = cur
+
+
+def test_per_signature_status_emitted_at_iter_100_only(tmp_path: Path, capsys):
+    """Per-signature block fires at i+1 == 100 but not at 99 or 101."""
+    log = tmp_path / "log.jsonl"
+    gen = MockGenerator(sequence=[_EXTRACT_FAIL] * 101)
+    run(gen, log, n_iterations=101, resume=False)
+
+    captured = capsys.readouterr().out
+    header_lines = [
+        l for l in captured.splitlines() if l.startswith("[forge] per-signature at iter ")
+    ]
+    assert len(header_lines) == 1
+    assert "at iter 100:" in header_lines[0]
+
+    body_prefix = "  "
+    body_lines = [
+        l for l in captured.splitlines()
+        if l.startswith(body_prefix) and " : total=" in l
+    ]
+    assert len(body_lines) == len(ACTIVE_SIGNATURES)
 
 
 def test_few_shot_dedup_under_threshold_returns_empty_pool():
