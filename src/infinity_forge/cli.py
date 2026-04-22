@@ -11,7 +11,7 @@ import argparse
 from pathlib import Path
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="forge",
         description="Run the ∞ Forge generator loop.",
@@ -24,16 +24,37 @@ def main() -> None:
         action="store_true",
         help="Run exactly 3 iterations as a smoke test before a long run.",
     )
+    parser.add_argument(
+        "--multi-model",
+        action="store_true",
+        help="Round-robin across Qwen3-1.7B and Gemma-2-2B instead of Qwen alone.",
+    )
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     n_iterations = 3 if args.sanity_check else args.iterations
 
     from infinity_forge.forge import run
-    from infinity_forge.generator import QwenGenerator
+    from infinity_forge.generator import (
+        GemmaGenerator,
+        MultiGenerator,
+        QwenGenerator,
+    )
     from infinity_forge.signatures import ACTIVE_SIGNATURES
 
+    if args.multi_model:
+        generator = MultiGenerator(
+            [("qwen", QwenGenerator()), ("gemma", GemmaGenerator())]
+        )
+    else:
+        generator = QwenGenerator()
+
     run(
-        generator=QwenGenerator(),
+        generator=generator,
         log_path=args.log,
         n_iterations=n_iterations,
         active_signatures=ACTIVE_SIGNATURES,

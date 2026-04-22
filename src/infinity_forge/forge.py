@@ -52,10 +52,15 @@ _FEW_SHOT_THRESHOLD: int = 10
 _STATUS_INTERVAL: int = 25
 _PER_SIG_INTERVAL: int = 100
 
+# Day 7 CSV adds a ``generator`` column after ``signature_out`` to record
+# which model produced each candidate under MultiGenerator. Single-model
+# runs write an empty string. This is a schema-breaking change vs. Day 5/6
+# CSVs — downstream analysis scripts must branch on column count.
 _CSV_HEADER: tuple[str, ...] = (
     "iteration",
     "signature_in",
     "signature_out",
+    "generator",
     "stage",
     "accepted",
     "cum_accepted",
@@ -90,10 +95,15 @@ class IterationResult:
     gate_result: Result | None
     fingerprint: Fingerprint | None
     timestamp: str
+    generator_name: str | None = None
 
     def to_json_line(self) -> str:
         d = asdict(self)
         d["signature"] = list(self.signature)
+        if d.get("generator_name") is None:
+            d.pop("generator_name", None)
+        else:
+            d["generator"] = d.pop("generator_name")
         return json.dumps(d, ensure_ascii=False)
 
 
@@ -252,19 +262,32 @@ def _inject_seeds(
         canonical_index.setdefault(ckey, (source, iteration))
 
 
+def _format_per_generator(
+    counts: dict[str, tuple[int, int]],
+) -> str:
+    """Render ``{name: (accepted, total)}`` as ``name=acc/tot`` space-separated."""
+    if not counts:
+        return ""
+    parts = [f"{name}={acc}/{tot}" for name, (acc, tot) in sorted(counts.items())]
+    return " | " + " ".join(parts)
+
+
 def _print_status(
     start: int,
     current: int,
     totals: dict[str, int],
+    per_generator: dict[str, tuple[int, int]] | None = None,
 ) -> None:
     processed = current - start + 1
     with_gate = totals["gate_ran"]
     accepts = totals["accepted"]
     rate = (accepts / with_gate * 100.0) if with_gate else 0.0
+    per_gen_str = _format_per_generator(per_generator or {})
     print(
         f"[forge] iter {start}..{current} "
         f"({processed} done) | "
-        f"accept {accepts}/{with_gate} ({rate:.1f}%) | "
+        f"accept {accepts}/{with_gate} ({rate:.1f}%)"
+        f"{per_gen_str} | "
         f"extract_fail={totals['extract_fail']} "
         f"layer1={totals['reject_layer_1']} "
         f"layer2={totals['reject_layer_2']} "
@@ -280,12 +303,16 @@ def _print_per_signature(
     current: int,
     sigs: list[tuple[str, str]],
     per_sig: dict[tuple[str, str], dict[str, int]],
+    per_sig_generator: dict[tuple[str, str], dict[str, tuple[int, int]]] | None = None,
 ) -> None:
     label_width = max(len(f"{s[0]} -> {s[1]}") for s in sigs)
     print(f"[forge] per-signature at iter {current + 1}:", flush=True)
     for sig in sigs:
         c = per_sig.get(sig, _empty_per_sig_counts())
         label = f"{sig[0]} -> {sig[1]}".ljust(label_width)
+        per_gen_str = ""
+        if per_sig_generator is not None:
+            per_gen_str = _format_per_generator(per_sig_generator.get(sig, {}))
         print(
             f"  {label} : "
             f"total={c['total']}  "
@@ -294,7 +321,8 @@ def _print_per_signature(
             f"bad={c['bad']}  "
             f"L2={c['L2']}  "
             f"sbx={c['sbx']}  "
-            f"canonical={c['canonical']}",
+            f"canonical={c['canonical']}"
+            f"{per_gen_str}",
             flush=True,
         )
 
@@ -361,6 +389,11 @@ def run(
         s: _empty_per_sig_counts() for s in sigs
     }
 
+    multi_mode = hasattr(generator, "last_generator_name")
+    # Per-generator (accepted, total_attempts) across the run, and per-(sig, generator).
+    per_generator: dict[str, tuple[int, int]] = {}
+    per_sig_generator: dict[tuple[str, str], dict[str, tuple[int, int]]] = {}
+
     end = start + n_iterations
     # CSV cumulatives are running totals from THIS process's start. On resume,
     # any pre-existing CSV rows from prior runs are preserved as-is, and the
@@ -399,6 +432,11 @@ def run(
             prompt = build_prompt(sig[0], sig[1], few_shot_atoms=few_shot)
             raw = generator.generate(prompt, temperature)
             source = extract_code(raw)
+
+            generator_name: str | None = (
+                getattr(generator, "last_generator_name") or None
+                if multi_mode else None
+            )
 
             input_value: Any = None
             gate_result: Result | None = None
@@ -502,6 +540,7 @@ def run(
                 gate_result=gate_result,
                 fingerprint=fingerprint,
                 timestamp=_now_iso(),
+                generator_name=generator_name,
             )
             fh.write(record.to_json_line())
             fh.write("\n")
@@ -509,11 +548,20 @@ def run(
 
             stage = _stage_from_record(source, gate_result)
             accepted_flag = 1 if (gate_result is not None and gate_result["accepted"]) else 0
+
+            if generator_name is not None:
+                acc, tot = per_generator.get(generator_name, (0, 0))
+                per_generator[generator_name] = (acc + accepted_flag, tot + 1)
+                sig_gen = per_sig_generator.setdefault(sig, {})
+                sacc, stot = sig_gen.get(generator_name, (0, 0))
+                sig_gen[generator_name] = (sacc + accepted_flag, stot + 1)
+
             csv_writer.writerow(
                 (
                     i,
                     sig[0],
                     sig[1],
+                    generator_name if generator_name is not None else "",
                     stage,
                     accepted_flag,
                     totals["accepted"],
@@ -527,10 +575,16 @@ def run(
             csv_fh.flush()
 
             if (i + 1) % _STATUS_INTERVAL == 0:
-                _print_status(start, i, totals)
+                _print_status(
+                    start, i, totals,
+                    per_generator if multi_mode else None,
+                )
 
             if (i + 1) % _PER_SIG_INTERVAL == 0:
-                _print_per_signature(i, sigs, per_sig)
+                _print_per_signature(
+                    i, sigs, per_sig,
+                    per_sig_generator if multi_mode else None,
+                )
 
         print(
             f"[forge] completed {n_iterations} iterations: "

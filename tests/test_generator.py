@@ -162,3 +162,74 @@ def test_qwen_generator_importable_but_not_instantiated():
     from infinity_forge.generator import QwenGenerator
     assert QwenGenerator.MODEL_ID == "Qwen/Qwen3-1.7B"
     # Do NOT call QwenGenerator() — would load the 1.7B model.
+
+
+# --- GemmaGenerator import only --------------------------------------------
+
+def test_gemma_generator_importable_but_not_instantiated():
+    from infinity_forge.generator import GemmaGenerator
+    assert GemmaGenerator.MODEL_ID == "google/gemma-2-2b-it"
+    assert hasattr(GemmaGenerator, "generate")
+    # Do NOT call GemmaGenerator() — would load the 2B model.
+
+
+# --- MultiGenerator ---------------------------------------------------------
+
+def test_multi_generator_round_robins_across_two():
+    from infinity_forge.generator import MultiGenerator
+
+    a = MockGenerator(sequence=["a1", "a2", "a3"])
+    b = MockGenerator(sequence=["b1", "b2", "b3"])
+    m = MultiGenerator([("a", a), ("b", b)])
+
+    assert m.generate("p", 0.7) == "a1"
+    assert m.last_generator_name == "a"
+    assert m.generate("p", 0.7) == "b1"
+    assert m.last_generator_name == "b"
+    assert m.generate("p", 0.7) == "a2"
+    assert m.last_generator_name == "a"
+    assert m.generate("p", 0.7) == "b2"
+    assert m.last_generator_name == "b"
+
+
+def test_multi_generator_initial_last_name_is_empty():
+    from infinity_forge.generator import MultiGenerator
+
+    a = MockGenerator(default="x")
+    m = MultiGenerator([("only", a)])
+    assert m.last_generator_name == ""
+
+
+def test_multi_generator_single_generator_passthrough():
+    from infinity_forge.generator import MultiGenerator
+
+    inner = MockGenerator(sequence=["one", "two", "three"])
+    m = MultiGenerator([("solo", inner)])
+
+    assert m.generate("p", 0.7) == "one"
+    assert m.last_generator_name == "solo"
+    assert m.generate("p", 0.9) == "two"
+    assert m.last_generator_name == "solo"
+    assert m.generate("p", 1.1) == "three"
+    assert m.last_generator_name == "solo"
+
+
+def test_multi_generator_forwards_prompt_and_temperature():
+    from infinity_forge.generator import MultiGenerator
+
+    a = MockGenerator(default="a-out")
+    b = MockGenerator(default="b-out")
+    m = MultiGenerator([("a", a), ("b", b)])
+
+    m.generate("prompt-1", 0.7)
+    m.generate("prompt-2", 1.1)
+
+    assert a.calls == [("prompt-1", 0.7)]
+    assert b.calls == [("prompt-2", 1.1)]
+
+
+def test_multi_generator_rejects_empty_list():
+    from infinity_forge.generator import MultiGenerator
+
+    with pytest.raises(ValueError):
+        MultiGenerator([])

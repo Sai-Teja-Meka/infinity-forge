@@ -16,12 +16,11 @@ REPRESENTATIVE_INPUTS: dict[tuple[str, str], object] = {
     ("int", "list[int]"): 12,
     ("dict", "int"): {"a": 1, "b": "hello"},
     ("list[str]", "list[str]"): ["bb", "a", "ccc"],
-    ("list[float]", "float"): [1.0, 2.0, 3.0],
 }
 
 
 def test_seed_atoms_nonempty():
-    assert len(SEED_ATOMS) >= 4
+    assert len(SEED_ATOMS) >= 3
 
 
 def test_seed_atoms_cover_the_three_weak_signatures():
@@ -29,7 +28,6 @@ def test_seed_atoms_cover_the_three_weak_signatures():
     assert ("int", "list[int]") in sigs
     assert ("dict", "int") in sigs
     assert ("list[str]", "list[str]") in sigs
-    assert ("list[float]", "float") in sigs
 
 
 def test_every_seed_has_required_fields():
@@ -92,15 +90,3 @@ def test_list_str_to_list_str_seed_correct():
     result = sandbox.run_in_sandbox(seed["source"], ["bb", "a", "ccc"])
     assert result["status"] == "ok"
     assert result["output"] == ["a", "bb", "ccc"]
-
-
-def test_list_float_to_float_seed_correct():
-    seed = next(s for s in SEED_ATOMS if s["signature"] == ("list[float]", "float"))
-    cascade_result = cascade.evaluate(seed["source"])
-    assert cascade_result["accepted"] is True, (
-        f"list[float]->float seed rejected at {cascade_result['stage']}: {cascade_result['reason']}"
-    )
-    result = sandbox.run_in_sandbox(seed["source"], [1.0, 2.0, 3.0])
-    assert result["status"] == "ok"
-    assert result["output"] == 2.0
-    assert isinstance(result["output"], float) is True

@@ -38,7 +38,6 @@ ACTIVE_SIGNATURES: list[tuple[str, str]] = [
     ("list[int]", "bool"),
     ("list[int]", "list[int]"),
     ("list[int]", "dict"),
-    ("list[float]", "float"),
     ("list[str]", "str"),
     ("list[str]", "list[str]"),
     ("str", "int"),

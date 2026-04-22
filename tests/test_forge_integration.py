@@ -36,7 +36,6 @@ _SIG_SOURCES: dict[tuple[str, str], str] = {
     ("list[int]", "bool"): "def f(lst):\n    return len(lst) > 0",
     ("list[int]", "list[int]"): "def f(lst):\n    return sorted(lst)",
     ("list[int]", "dict"): "def f(lst):\n    return {str(i): lst[i] for i in range(len(lst))}",
-    ("list[float]", "float"): "def f(lst):\n    return sum(lst) + 0.0",
     ("list[str]", "str"): "def f(lst):\n    return ''.join(lst)",
     ("list[str]", "list[str]"): "def f(lst):\n    return sorted(lst)",
     ("str", "int"): "def f(s):\n    return len(s)",
@@ -352,11 +351,16 @@ def test_csv_metrics_has_header_and_monotonic_cumulatives(tmp_path: Path):
 
     header = rows[0]
     assert header == [
-        "iteration", "signature_in", "signature_out", "stage", "accepted",
+        "iteration", "signature_in", "signature_out", "generator",
+        "stage", "accepted",
         "cum_accepted", "cum_dup", "cum_bad", "cum_l1", "cum_l2", "cum_sandbox",
     ]
     data = rows[1:]
     assert len(data) == 10
+    # Single-model (non-Multi) runs leave the generator column blank.
+    for row in data:
+        rec = dict(zip(header, row))
+        assert rec["generator"] == ""
 
     cum_cols = ("cum_accepted", "cum_dup", "cum_bad", "cum_l1", "cum_l2", "cum_sandbox")
     prev = {c: 0 for c in cum_cols}
@@ -366,6 +370,46 @@ def test_csv_metrics_has_header_and_monotonic_cumulatives(tmp_path: Path):
             cur = int(rec[c])
             assert cur >= prev[c], f"{c} decreased: {prev[c]} -> {cur}"
             prev[c] = cur
+
+
+def test_multi_generator_records_generator_in_jsonl_and_csv(tmp_path: Path):
+    """Run with a MultiGenerator; JSONL alternates ``generator`` a/b, CSV col populated."""
+    from infinity_forge.generator import MultiGenerator
+
+    n = 10
+    seq_a = [_accept_src_for(_sig_for(i)) for i in range(0, n, 2)]
+    seq_b = [_accept_src_for(_sig_for(i)) for i in range(1, n, 2)]
+    gen_a = MockGenerator(sequence=seq_a)
+    gen_b = MockGenerator(sequence=seq_b)
+    multi = MultiGenerator([("a", gen_a), ("b", gen_b)])
+
+    log = tmp_path / "log.jsonl"
+    run(multi, log, n_iterations=n, resume=False)
+
+    recs = _gen_iterations(log)
+    assert len(recs) == n
+    for rec in recs:
+        assert "generator" in rec, f"JSONL missing generator field: {rec}"
+    gen_names = [rec["generator"] for rec in recs]
+    assert gen_names == ["a", "b"] * (n // 2)
+
+    csv_path = tmp_path / "log.csv"
+    with csv_path.open("r", encoding="utf-8", newline="") as fh:
+        rows = list(csv.reader(fh))
+    header = rows[0]
+    data = rows[1:]
+    csv_gens = [dict(zip(header, row))["generator"] for row in data]
+    assert csv_gens == ["a", "b"] * (n // 2)
+
+
+def test_single_model_run_omits_generator_field_from_jsonl(tmp_path: Path):
+    """Backward-compat: no ``generator`` key when a bare Generator is used."""
+    log = tmp_path / "log.jsonl"
+    gen = _make_gen(4)
+    run(gen, log, n_iterations=4, resume=False)
+
+    for rec in _gen_iterations(log):
+        assert "generator" not in rec
 
 
 def test_per_signature_status_emitted_at_iter_100_only(tmp_path: Path, capsys):

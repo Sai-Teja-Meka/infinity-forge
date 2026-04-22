@@ -19,7 +19,7 @@ def test_output_types_count():
 
 
 def test_active_signatures_count():
-    assert len(ACTIVE_SIGNATURES) == 15
+    assert len(ACTIVE_SIGNATURES) == 14
 
 
 def test_no_tuple_anywhere():
