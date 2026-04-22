@@ -177,7 +177,7 @@ def test_gemma_generator_importable_but_not_instantiated():
 
 def test_phi_generator_importable_but_not_instantiated():
     from infinity_forge.generator import PhiGenerator
-    assert PhiGenerator.MODEL_ID == "microsoft/Phi-3.5-mini-instruct"
+    assert PhiGenerator.MODEL_ID == "HuggingFaceTB/SmolLM2-1.7B-Instruct"
     assert hasattr(PhiGenerator, "generate")
     # Do NOT call PhiGenerator() — would load the 3.8B model.
 

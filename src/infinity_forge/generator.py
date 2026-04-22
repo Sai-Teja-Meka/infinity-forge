@@ -175,14 +175,14 @@ class GemmaGenerator(Generator):
 
 
 class PhiGenerator(Generator):
-    """Loads microsoft/Phi-3.5-mini-instruct via transformers on first generate() call.
+    """Loads HuggingFaceTB/SmolLM2-1.7B-Instruct via transformers on first generate() call.
 
-    Phi-3.5-mini-instruct is a 3.8B model trained on synthetic textbook-quality
-    data. Different training pipeline from both Qwen (Alibaba) and Gemma (Google)
-    maximizes distributional diversity in the multi-model setup.
+    SmolLM2 is trained on FineWeb-Edu + curated data (HuggingFace). Different
+    training pipeline from both Qwen (Alibaba) and Gemma (Google) maximizes
+    distributional diversity in the multi-model setup.
     """
 
-    MODEL_ID: str = "microsoft/Phi-3.5-mini-instruct"
+    MODEL_ID: str = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
 
     def __init__(self) -> None:
         self._model = None
@@ -197,13 +197,11 @@ class PhiGenerator(Generator):
         dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            self.MODEL_ID, trust_remote_code=True,
-        )
+        self._tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
         self._model = AutoModelForCausalLM.from_pretrained(
-            self.MODEL_ID, dtype=dtype, trust_remote_code=True,
+            self.MODEL_ID, dtype=dtype,
         ).to(device)
-        print(f"PhiGenerator: using device={device}", flush=True)
+        print(f"SmolLMGenerator: using device={device}", flush=True)
 
     def generate(self, prompt: str, temperature: float) -> str:
         self._load()

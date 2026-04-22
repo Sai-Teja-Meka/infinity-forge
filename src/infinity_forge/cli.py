@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--multi-model",
         action="store_true",
-        help="Round-robin across Qwen3-1.7B, Gemma-2-2B, and Phi-3.5-mini instead of Qwen alone.",
+        help="Round-robin across Qwen3-1.7B, Gemma-2-2B, and SmolLM2-1.7B instead of Qwen alone.",
     )
     return parser
 
