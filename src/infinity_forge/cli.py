@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--multi-model",
         action="store_true",
-        help="Round-robin across Qwen3-1.7B and Gemma-2-2B instead of Qwen alone.",
+        help="Round-robin across Qwen3-1.7B, Gemma-2-2B, and Phi-3.5-mini instead of Qwen alone.",
     )
     return parser
 
@@ -42,14 +42,17 @@ def main() -> None:
     from infinity_forge.generator import (
         GemmaGenerator,
         MultiGenerator,
+        PhiGenerator,
         QwenGenerator,
     )
     from infinity_forge.signatures import ACTIVE_SIGNATURES
 
     if args.multi_model:
-        generator = MultiGenerator(
-            [("qwen", QwenGenerator()), ("gemma", GemmaGenerator())]
-        )
+        generator = MultiGenerator([
+            ("qwen", QwenGenerator()),
+            ("gemma", GemmaGenerator()),
+            ("phi", PhiGenerator()),
+        ])
     else:
         generator = QwenGenerator()
 

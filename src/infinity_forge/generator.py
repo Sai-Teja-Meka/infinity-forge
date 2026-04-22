@@ -174,6 +174,60 @@ class GemmaGenerator(Generator):
         return generated
 
 
+class PhiGenerator(Generator):
+    """Loads microsoft/Phi-3.5-mini-instruct via transformers on first generate() call.
+
+    Phi-3.5-mini-instruct is a 3.8B model trained on synthetic textbook-quality
+    data. Different training pipeline from both Qwen (Alibaba) and Gemma (Google)
+    maximizes distributional diversity in the multi-model setup.
+    """
+
+    MODEL_ID: str = "microsoft/Phi-3.5-mini-instruct"
+
+    def __init__(self) -> None:
+        self._model = None
+        self._tokenizer = None
+
+    def _load(self) -> None:
+        if self._model is not None:
+            return
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            self.MODEL_ID, trust_remote_code=True,
+        )
+        self._model = AutoModelForCausalLM.from_pretrained(
+            self.MODEL_ID, dtype=dtype, trust_remote_code=True,
+        ).to(device)
+        print(f"PhiGenerator: using device={device}", flush=True)
+
+    def generate(self, prompt: str, temperature: float) -> str:
+        self._load()
+
+        messages = [{"role": "user", "content": prompt}]
+        input_text = self._tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
+        inputs = self._tokenizer(input_text, return_tensors="pt").to(self._model.device)
+        outputs = self._model.generate(
+            **inputs,
+            max_new_tokens=512,
+            temperature=temperature,
+            top_p=0.95,
+            do_sample=True,
+            repetition_penalty=1.2,
+        )
+        generated = self._tokenizer.decode(
+            outputs[0][inputs["input_ids"].shape[-1]:],
+            skip_special_tokens=True,
+        )
+        return generated
+
+
 class MultiGenerator(Generator):
     """Round-robin across multiple generators.
 

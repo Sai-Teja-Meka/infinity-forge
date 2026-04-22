@@ -173,6 +173,15 @@ def test_gemma_generator_importable_but_not_instantiated():
     # Do NOT call GemmaGenerator() — would load the 2B model.
 
 
+# --- PhiGenerator import only ----------------------------------------------
+
+def test_phi_generator_importable_but_not_instantiated():
+    from infinity_forge.generator import PhiGenerator
+    assert PhiGenerator.MODEL_ID == "microsoft/Phi-3.5-mini-instruct"
+    assert hasattr(PhiGenerator, "generate")
+    # Do NOT call PhiGenerator() — would load the 3.8B model.
+
+
 # --- MultiGenerator ---------------------------------------------------------
 
 def test_multi_generator_round_robins_across_two():
