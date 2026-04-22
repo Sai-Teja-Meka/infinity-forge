@@ -32,4 +32,9 @@ SEED_ATOMS: list[dict] = [
         "source": "def f(lst):\n    return sorted(lst, key=len)",
         "note": "sort strings by length",
     },
+    {
+        "signature": ("list[float]", "float"),
+        "source": "def f(lst):\n    return sum(lst) / len(lst) if lst else 0.0",
+        "note": "mean of list; returns float via true division; handles empty list",
+    },
 ]

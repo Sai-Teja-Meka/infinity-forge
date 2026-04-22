@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from infinity_forge.canonical import canonical_key, canonicalize
 from infinity_forge.cascade import Result, gate
 from infinity_forge.generator import Generator, extract_code
 from infinity_forge.inputs import sample_input
@@ -67,7 +68,15 @@ _CSV_HEADER: tuple[str, ...] = (
 
 
 def _empty_per_sig_counts() -> dict[str, int]:
-    return {"total": 0, "novel": 0, "dup": 0, "bad": 0, "L2": 0, "sbx": 0}
+    return {
+        "total": 0,
+        "novel": 0,
+        "dup": 0,
+        "bad": 0,
+        "L2": 0,
+        "sbx": 0,
+        "canonical": 0,
+    }
 
 
 @dataclass
@@ -146,23 +155,32 @@ def _pick_few_shot(
 
 def _read_existing(
     log_path: Path,
-) -> tuple[int, dict[tuple[str, str], list[tuple[str, Fingerprint]]]]:
-    """Return (next_iteration_index, accepted_by_sig) from log_path.
+) -> tuple[
+    int,
+    dict[tuple[str, str], list[tuple[str, Fingerprint]]],
+    dict[str, tuple[str, int]],
+]:
+    """Return (next_iteration_index, accepted_by_sig, canonical_index) from log_path.
 
     ``accepted_by_sig`` is ``{sig: [(source, fingerprint), ...]}`` in insertion
     order (oldest first). Entries missing a fingerprint are skipped from the
     few-shot pool — they remain in the log but cannot participate in the
     distinct-fingerprint few-shot selection.
 
+    ``canonical_index`` maps ``canonical_key`` → ``(source, iteration)`` for
+    every accepted atom in the log, first-seen wins. Used as the fast-path
+    novelty pre-filter in the main loop.
+
     Seed entries (negative iteration) ARE included in ``accepted_by_sig`` so
     few-shot can pull from them. They do NOT influence ``next_iteration_index``,
     which considers non-negative iterations only.
     """
     if not log_path.exists():
-        return 0, {}
+        return 0, {}, {}
 
     max_iter = -1
     accepted: dict[tuple[str, str], list[tuple[str, Fingerprint]]] = {}
+    canonical_index: dict[str, tuple[str, int]] = {}
     with log_path.open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -189,7 +207,9 @@ def _read_existing(
             ):
                 key = (sig[0], sig[1])
                 accepted.setdefault(key, []).append((src, list(fp)))
-    return max_iter + 1, accepted
+                ckey = canonical_key(canonicalize(src), key)
+                canonical_index.setdefault(ckey, (src, it if isinstance(it, int) else 0))
+    return max_iter + 1, accepted, canonical_index
 
 
 def _inject_seeds(
@@ -198,8 +218,9 @@ def _inject_seeds(
     fp_index_path: Path,
     fp_index: dict[str, tuple[str, int]],
     accepted_by_sig: dict[tuple[str, str], list[tuple[str, Fingerprint]]],
+    canonical_index: dict[str, tuple[str, int]],
 ) -> None:
-    """Write each seed atom to the log + fingerprint index. Iterations are -1, -2, ..."""
+    """Write each seed atom to the log + fingerprint + canonical index. Iterations are -1, -2, ..."""
     for i, seed in enumerate(SEED_ATOMS):
         iteration = -(i + 1)
         sig = tuple(seed["signature"])
@@ -227,6 +248,8 @@ def _inject_seeds(
         append_to_index(fp_index_path, key, source, iteration)
         fp_index[key] = (source, iteration)
         accepted_by_sig.setdefault(sig, []).append((source, fingerprint))
+        ckey = canonical_key(canonicalize(source), sig)
+        canonical_index.setdefault(ckey, (source, iteration))
 
 
 def _print_status(
@@ -247,7 +270,8 @@ def _print_status(
         f"layer2={totals['reject_layer_2']} "
         f"sandbox={totals['reject_sandbox']} "
         f"l6type={totals['reject_layer_6']} "
-        f"novelty={totals['reject_novelty']}",
+        f"novelty={totals['reject_novelty']} "
+        f"canonical={totals['canonical']}",
         flush=True,
     )
 
@@ -269,7 +293,8 @@ def _print_per_signature(
             f"dup={c['dup']}  "
             f"bad={c['bad']}  "
             f"L2={c['L2']}  "
-            f"sbx={c['sbx']}",
+            f"sbx={c['sbx']}  "
+            f"canonical={c['canonical']}",
             flush=True,
         )
 
@@ -301,9 +326,9 @@ def run(
     csv_fresh = not csv_path.exists()
 
     if resume:
-        start, accepted_by_sig = _read_existing(log_path)
+        start, accepted_by_sig, canonical_index = _read_existing(log_path)
     else:
-        start, accepted_by_sig = 0, {}
+        start, accepted_by_sig, canonical_index = 0, {}, {}
 
     fp_index = load_index(fp_index_path)
 
@@ -311,10 +336,12 @@ def run(
         m = sum(len(v) for v in accepted_by_sig.values())
         k = len(accepted_by_sig)
         f = len(fp_index)
+        c = len(canonical_index)
         print(
             f"[forge] resuming from iteration {start}, "
             f"found {m} accepted atoms across {k} signatures, "
-            f"fingerprint index has {f} entries",
+            f"fingerprint index has {f} entries, "
+            f"canonical index has {c} entries",
             flush=True,
         )
 
@@ -327,6 +354,7 @@ def run(
         "reject_sandbox": 0,
         "reject_layer_6": 0,
         "reject_novelty": 0,
+        "canonical": 0,
     }
 
     per_sig: dict[tuple[str, str], dict[str, int]] = {
@@ -348,7 +376,14 @@ def run(
             csv_fh.flush()
 
         if fresh_run:
-            _inject_seeds(fh, log_path, fp_index_path, fp_index, accepted_by_sig)
+            _inject_seeds(
+                fh,
+                log_path,
+                fp_index_path,
+                fp_index,
+                accepted_by_sig,
+                canonical_index,
+            )
 
         for i in range(start, end):
             sig = sigs[i % len(sigs)]
@@ -380,51 +415,72 @@ def run(
                 totals["gate_ran"] += 1
 
                 if gate_result["accepted"]:
-                    fingerprint = compute_fingerprint(source, sig)
-                    bad_idx = _first_bad_type_probe_index(fingerprint)
-                    if bad_idx is not None:
-                        expected = EXPECTED_OUTPUT_TYPES[sig[1]].__name__
+                    ckey = canonical_key(canonicalize(source), sig)
+                    if ckey in canonical_index:
+                        existing_iter = canonical_index[ckey][1]
                         gate_result = Result(
                             accepted=False,
-                            stage="layer_6",
-                            reason=(
-                                f"layer_6: output type mismatch on probe[{bad_idx}]: "
-                                f"expected {expected}"
-                            ),
+                            stage="novelty",
+                            reason=f"canonical duplicate of atom from iteration {existing_iter}",
                             value=gate_result.get("value"),
                             duration_ms=gate_result.get("duration_ms"),
-                            metadata={**gate_result.get("metadata", {}), "layer_6_reject": "type"},
+                            metadata={
+                                **gate_result.get("metadata", {}),
+                                "layer_6_reject": "canonical_duplicate",
+                                "duplicate_of_iteration": existing_iter,
+                            },
                         )
-                        totals["reject_layer_6"] += 1
-                        sig_counts["bad"] += 1
+                        totals["reject_novelty"] += 1
+                        totals["canonical"] += 1
+                        sig_counts["dup"] += 1
+                        sig_counts["canonical"] += 1
                     else:
-                        novel, existing_source = is_novel(fingerprint, fp_index, sig)
-                        if not novel:
-                            key = index_key(sig, fingerprint)
-                            existing_iter = fp_index[key][1]
+                        fingerprint = compute_fingerprint(source, sig)
+                        bad_idx = _first_bad_type_probe_index(fingerprint)
+                        if bad_idx is not None:
+                            expected = EXPECTED_OUTPUT_TYPES[sig[1]].__name__
                             gate_result = Result(
                                 accepted=False,
-                                stage="novelty",
-                                reason=f"layer_6: duplicate of atom from iteration {existing_iter}",
+                                stage="layer_6",
+                                reason=(
+                                    f"layer_6: output type mismatch on probe[{bad_idx}]: "
+                                    f"expected {expected}"
+                                ),
                                 value=gate_result.get("value"),
                                 duration_ms=gate_result.get("duration_ms"),
-                                metadata={
-                                    **gate_result.get("metadata", {}),
-                                    "layer_6_reject": "duplicate",
-                                    "duplicate_of_iteration": existing_iter,
-                                },
+                                metadata={**gate_result.get("metadata", {}), "layer_6_reject": "type"},
                             )
-                            totals["reject_novelty"] += 1
-                            sig_counts["dup"] += 1
+                            totals["reject_layer_6"] += 1
+                            sig_counts["bad"] += 1
                         else:
-                            totals["accepted"] += 1
-                            sig_counts["novel"] += 1
-                            key = index_key(sig, fingerprint)
-                            append_to_index(fp_index_path, key, source, i)
-                            fp_index[key] = (source, i)
-                            accepted_by_sig.setdefault(sig, []).append(
-                                (source, fingerprint)
-                            )
+                            novel, existing_source = is_novel(fingerprint, fp_index, sig)
+                            if not novel:
+                                key = index_key(sig, fingerprint)
+                                existing_iter = fp_index[key][1]
+                                gate_result = Result(
+                                    accepted=False,
+                                    stage="novelty",
+                                    reason=f"layer_6: duplicate of atom from iteration {existing_iter}",
+                                    value=gate_result.get("value"),
+                                    duration_ms=gate_result.get("duration_ms"),
+                                    metadata={
+                                        **gate_result.get("metadata", {}),
+                                        "layer_6_reject": "duplicate",
+                                        "duplicate_of_iteration": existing_iter,
+                                    },
+                                )
+                                totals["reject_novelty"] += 1
+                                sig_counts["dup"] += 1
+                            else:
+                                totals["accepted"] += 1
+                                sig_counts["novel"] += 1
+                                key = index_key(sig, fingerprint)
+                                append_to_index(fp_index_path, key, source, i)
+                                fp_index[key] = (source, i)
+                                canonical_index[ckey] = (source, i)
+                                accepted_by_sig.setdefault(sig, []).append(
+                                    (source, fingerprint)
+                                )
                 else:
                     stage = gate_result["stage"]
                     if stage == "layer_1":

@@ -111,6 +111,19 @@ def test_no_validate_sentence_appears_after_return_type_line():
     assert returns_idx < no_validate_idx
 
 
+def test_prompt_forbids_isinstance_by_name():
+    p = build_prompt("int", "int")
+    assert "Never call isinstance — it is not available and will cause rejection." in p
+
+
+def test_isinstance_sentence_appears_immediately_after_do_not_validate_sentence():
+    p = build_prompt("dict", "int")
+    no_validate_idx = p.index("Do not validate")
+    isinstance_idx = p.index("Never call isinstance")
+    builtins_idx = p.index("Allowed builtins only")
+    assert no_validate_idx < isinstance_idx < builtins_idx
+
+
 @pytest.mark.parametrize("inp,out", ACTIVE_SIGNATURES)
 def test_prompt_builds_for_every_active_signature(inp, out):
     p = build_prompt(inp, out)

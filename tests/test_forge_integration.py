@@ -289,7 +289,11 @@ def test_resume_does_not_reinject_seeds(tmp_path: Path, capsys):
 
 
 def test_duplicate_atom_flagged_as_novelty(tmp_path: Path):
-    """Same source twice for the same signature → second is rejected at Layer 6 novelty."""
+    """Same source twice for the same signature → second is rejected at novelty.
+
+    Since Gate 5, the second is caught by the canonical fast-path before
+    fingerprinting, so ``fingerprint`` on the duplicate is ``None``.
+    """
     log = tmp_path / "log.jsonl"
     src = _accept_src_for(("int", "int"))
     gen = MockGenerator(sequence=[src, src])
@@ -315,7 +319,7 @@ def test_duplicate_atom_flagged_as_novelty(tmp_path: Path):
     assert second["gate_result"]["stage"] == "novelty"
     assert "duplicate" in second["gate_result"]["reason"]
     assert "iteration 0" in second["gate_result"]["reason"]
-    assert second["fingerprint"] == first["fingerprint"]
+    assert second["fingerprint"] is None
 
 
 def test_few_shot_deduplicates_by_fingerprint():
@@ -396,3 +400,52 @@ def test_few_shot_dedup_under_threshold_returns_empty_pool():
     picked = _pick_few_shot(pool, k=3)
     # Newest-first: uniq (fp=y), dup_8 (fp=x), dup_7 (dup), ... → ["uniq", "dup_8"].
     assert picked == ["uniq", "dup_8"]
+
+
+# ----------------------------- Day 6 gate-5 canonical coverage ---------------
+
+
+def test_variable_name_variant_rejected_at_canonical_before_fingerprint(tmp_path: Path):
+    """Two variable-name-variants for the same signature: second rejected at
+    novelty by the canonical fast-path, with fingerprint=None (proves
+    fingerprint computation was skipped)."""
+    log = tmp_path / "log.jsonl"
+    src_a = "```python\ndef f(n):\n    return n + 1\n```"
+    src_b = "```python\ndef f(x):\n    return x + 1\n```"
+    gen = MockGenerator(sequence=[src_a, src_b])
+    run(
+        gen,
+        log,
+        n_iterations=2,
+        active_signatures=[("int", "int")],
+        resume=False,
+    )
+
+    gen_recs = _gen_iterations(log)
+    assert len(gen_recs) == 2
+
+    first, second = gen_recs[0], gen_recs[1]
+    assert first["gate_result"]["accepted"] is True
+    assert first["fingerprint"] is not None
+
+    assert second["gate_result"]["accepted"] is False
+    assert second["gate_result"]["stage"] == "novelty"
+    assert "canonical duplicate" in second["gate_result"]["reason"]
+    assert "iteration 0" in second["gate_result"]["reason"]
+    assert second["fingerprint"] is None
+    assert (
+        second["gate_result"]["metadata"].get("layer_6_reject")
+        == "canonical_duplicate"
+    )
+
+
+def test_canonical_count_appears_in_status_line(tmp_path: Path, capsys):
+    """The per-25 status line includes a `canonical=` observability counter."""
+    log = tmp_path / "log.jsonl"
+    gen = _make_gen(30)
+    run(gen, log, n_iterations=25, resume=False)
+
+    captured = capsys.readouterr().out
+    status_lines = [l for l in captured.splitlines() if l.startswith("[forge] iter ")]
+    assert len(status_lines) == 1
+    assert "canonical=" in status_lines[0]
