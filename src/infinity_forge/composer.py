@@ -141,8 +141,26 @@ def find_composable_pairs(
     return pairs
 
 
+def is_composition_ready(atom: dict) -> bool:
+    """Check if an atom's fingerprint has any __raises__ slots.
+
+    An atom that crashes on any of its 20 probes is not safe to
+    compose with — its input domain is narrower than its signature
+    promises. Such atoms stay in the Level 1 library (they're
+    behaviorally valid and novel) but are excluded from Level 2
+    composition to avoid cascading crashes.
+    """
+    fingerprint = atom.get("fingerprint", [])
+    if not fingerprint:
+        return False  # no fingerprint = can't verify = don't compose
+    return not any(
+        slot.startswith("__raises__") or slot == "__bad_output_type__"
+        for slot in fingerprint
+    )
+
+
 def _load_accepted_atoms(log_path: Path) -> list[dict]:
-    """Return ``[{"source", "signature"}]`` for every accepted L1 atom."""
+    """Return ``[{"source", "signature", "fingerprint"}]`` for every accepted L1 atom."""
     if not log_path.exists():
         return []
     out: list[dict] = []
@@ -167,7 +185,13 @@ def _load_accepted_atoms(log_path: Path) -> list[dict]:
                 and gr.get("accepted") is True
                 and isinstance(fp, list)
             ):
-                out.append({"source": src, "signature": (sig[0], sig[1])})
+                out.append(
+                    {
+                        "source": src,
+                        "signature": (sig[0], sig[1]),
+                        "fingerprint": list(fp),
+                    }
+                )
     return out
 
 
@@ -226,11 +250,29 @@ def compose_run(
     combined_fp.update(load_index(l1_fp_path))
     combined_fp.update(load_index(l2_fp_path))
 
-    atoms = _load_accepted_atoms(level1_log_path)
+    all_atoms = _load_accepted_atoms(level1_log_path)
+    raises_count = sum(
+        1
+        for a in all_atoms
+        if any(slot.startswith("__raises__") for slot in a.get("fingerprint", []))
+    )
+    bad_type_count = sum(
+        1
+        for a in all_atoms
+        if any(slot == "__bad_output_type__" for slot in a.get("fingerprint", []))
+    )
+    atoms = [a for a in all_atoms if is_composition_ready(a)]
+    filtered_out = len(all_atoms) - len(atoms)
+    print(
+        f"[composer] filtered {filtered_out} of {len(all_atoms)} L1 atoms as "
+        f"not composition-ready ({raises_count} with __raises__, "
+        f"{bad_type_count} with __bad_output_type__)",
+        flush=True,
+    )
     pairs = find_composable_pairs(atoms, active_signatures)
 
     canonical_seen: set[str] = set()
-    for a in atoms:
+    for a in all_atoms:
         sig = tuple(a["signature"])
         canonical_seen.add(canonical_key(canonicalize(a["source"]), sig))
 
@@ -253,11 +295,41 @@ def compose_run(
 
     print(
         f"[composer] enumerating {len(pairs)} type-compatible pairs "
-        f"from {len(atoms)} L1 atoms",
+        f"from {len(atoms)} composition-ready L1 atoms",
         flush=True,
     )
 
-    with output_log_path.open("a", encoding="utf-8") as fh:
+    failures_path = output_log_path.with_suffix(".failures.jsonl")
+
+    def _log_failure(
+        fail_fh,
+        atom_a: dict,
+        atom_b: dict,
+        composed_sig: tuple[str, str],
+        composed_source: str,
+        stage: str,
+        reason: str,
+    ) -> None:
+        rec = {
+            "atom_a": {
+                "source": atom_a["source"],
+                "signature": list(atom_a["signature"]),
+            },
+            "atom_b": {
+                "source": atom_b["source"],
+                "signature": list(atom_b["signature"]),
+            },
+            "composed_source": composed_source,
+            "composed_signature": list(composed_sig),
+            "rejection_stage": stage,
+            "rejection_reason": reason,
+        }
+        fail_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        fail_fh.flush()
+
+    with output_log_path.open("a", encoding="utf-8") as fh, failures_path.open(
+        "a", encoding="utf-8"
+    ) as fail_fh:
         for pair_idx, (atom_a, atom_b, composed_sig) in enumerate(pairs):
             counts["attempted"] += 1
             try:
@@ -266,8 +338,11 @@ def compose_run(
                 source = compose_source(
                     atom_a["source"], param_a, atom_b["source"], param_b
                 )
-            except (SyntaxError, ValueError):
+            except (SyntaxError, ValueError) as exc:
                 counts["extract_fail"] += 1
+                _log_failure(
+                    fail_fh, atom_a, atom_b, composed_sig, "", "extract_fail", str(exc)
+                )
                 _maybe_progress(counts)
                 continue
 
@@ -276,24 +351,60 @@ def compose_run(
             if not gate_result["accepted"]:
                 stage = gate_result["stage"]
                 counts[stage] = counts.get(stage, 0) + 1
+                _log_failure(
+                    fail_fh,
+                    atom_a,
+                    atom_b,
+                    composed_sig,
+                    source,
+                    stage,
+                    str(gate_result.get("reason") or ""),
+                )
                 _maybe_progress(counts)
                 continue
 
             ckey = canonical_key(canonicalize(source), composed_sig)
             if ckey in canonical_seen:
                 counts["canonical_dup"] += 1
+                _log_failure(
+                    fail_fh,
+                    atom_a,
+                    atom_b,
+                    composed_sig,
+                    source,
+                    "canonical",
+                    "canonical duplicate of known atom",
+                )
                 _maybe_progress(counts)
                 continue
 
             fingerprint = compute_fingerprint(source, composed_sig)
             if any(slot == "__bad_output_type__" for slot in fingerprint):
                 counts["bad_type"] += 1
+                _log_failure(
+                    fail_fh,
+                    atom_a,
+                    atom_b,
+                    composed_sig,
+                    source,
+                    "novelty",
+                    "composition returned wrong output type on at least one probe",
+                )
                 _maybe_progress(counts)
                 continue
 
             novel, _existing = is_novel(fingerprint, combined_fp, composed_sig)
             if not novel:
                 counts["fingerprint_dup"] += 1
+                _log_failure(
+                    fail_fh,
+                    atom_a,
+                    atom_b,
+                    composed_sig,
+                    source,
+                    "layer_6",
+                    "fingerprint duplicate of existing atom",
+                )
                 _maybe_progress(counts)
                 continue
 

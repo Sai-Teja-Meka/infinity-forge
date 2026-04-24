@@ -14,6 +14,7 @@ from infinity_forge.composer import (
     extract_body,
     extract_param_name,
     find_composable_pairs,
+    is_composition_ready,
 )
 
 
@@ -248,6 +249,239 @@ def test_compose_run_writes_at_least_one_l2_atom(tmp_path: Path):
     assert first["components"][0]["source"] == DIVISORS_SRC
     # The composed signature must be one of the active signatures we passed.
     assert tuple(first["signature"]) == ("int", "int")
+
+
+def test_is_composition_ready_clean_fingerprint():
+    atom = {
+        "source": SUM_SRC,
+        "signature": ("list[int]", "int"),
+        "fingerprint": ["0", "1", "2", "3", "4", "5"],
+    }
+    assert is_composition_ready(atom) is True
+
+
+def test_is_composition_ready_rejects_raises_slot():
+    atom = {
+        "source": SUM_SRC,
+        "signature": ("list[int]", "int"),
+        "fingerprint": ["0", "1", "__raises__:ZeroDivisionError", "3"],
+    }
+    assert is_composition_ready(atom) is False
+
+
+def test_is_composition_ready_rejects_bad_output_type():
+    atom = {
+        "source": SUM_SRC,
+        "signature": ("list[int]", "int"),
+        "fingerprint": ["0", "1", "__bad_output_type__", "3"],
+    }
+    assert is_composition_ready(atom) is False
+
+
+def test_is_composition_ready_missing_fingerprint():
+    atom = {"source": SUM_SRC, "signature": ("list[int]", "int")}
+    assert is_composition_ready(atom) is False
+    atom_empty = {
+        "source": SUM_SRC,
+        "signature": ("list[int]", "int"),
+        "fingerprint": [],
+    }
+    assert is_composition_ready(atom_empty) is False
+
+
+def test_compose_run_filters_fragile_atoms(tmp_path: Path):
+    """A fragile atom (with __raises__) should not participate in composition.
+
+    Concretely: divisors-then-sum normally yields a valid L2 atom. If we
+    replace DIVISORS_SRC with a version that raises on one of its probes,
+    the composition-readiness filter should exclude it from pair enumeration,
+    so no L2 atom is written.
+    """
+    from infinity_forge.novelty import compute_fingerprint, index_key, append_to_index
+
+    l1 = tmp_path / "l1.jsonl"
+    l2 = tmp_path / "l1.l2.jsonl"
+    fp_path = l1.with_name(l1.stem + ".fingerprints.jsonl")
+
+    divisors_fp = compute_fingerprint(DIVISORS_SRC, ("int", "list[int]"))
+    sum_fp = compute_fingerprint(SUM_SRC, ("list[int]", "int"))
+    # Inject a __raises__ slot into the divisors fingerprint, simulating an
+    # atom that crashed on one of its 20 probes.
+    fragile_fp = list(divisors_fp)
+    fragile_fp[0] = "__raises__:ZeroDivisionError"
+
+    records = [
+        {
+            "iteration": 0,
+            "signature": ["int", "list[int]"],
+            "extracted_source": DIVISORS_SRC,
+            "input_value": None,
+            "gate_result": {
+                "accepted": True,
+                "stage": "completed",
+                "reason": None,
+                "value": None,
+                "duration_ms": 0.0,
+                "metadata": {},
+            },
+            "fingerprint": fragile_fp,
+        },
+        {
+            "iteration": 1,
+            "signature": ["list[int]", "int"],
+            "extracted_source": SUM_SRC,
+            "input_value": None,
+            "gate_result": {
+                "accepted": True,
+                "stage": "completed",
+                "reason": None,
+                "value": None,
+                "duration_ms": 0.0,
+                "metadata": {},
+            },
+            "fingerprint": sum_fp,
+        },
+    ]
+    with l1.open("w", encoding="utf-8") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec) + "\n")
+    append_to_index(
+        fp_path,
+        index_key(("int", "list[int]"), fragile_fp),
+        DIVISORS_SRC,
+        0,
+    )
+    append_to_index(fp_path, index_key(("list[int]", "int"), sum_fp), SUM_SRC, 1)
+
+    compose_run(
+        l1,
+        l2,
+        [("int", "int"), ("int", "list[int]"), ("list[int]", "int")],
+    )
+
+    if l2.exists():
+        lines = [json.loads(x) for x in l2.read_text().splitlines() if x.strip()]
+        assert lines == [], (
+            f"fragile atom should have been filtered from composition; got {lines}"
+        )
+
+
+def test_compose_run_logs_filtered_count(tmp_path: Path, capsys):
+    """The filter-count log line reports how many L1 atoms were excluded."""
+    from infinity_forge.novelty import compute_fingerprint, index_key, append_to_index
+
+    l1 = tmp_path / "l1.jsonl"
+    l2 = tmp_path / "l1.l2.jsonl"
+    fp_path = l1.with_name(l1.stem + ".fingerprints.jsonl")
+
+    divisors_fp = compute_fingerprint(DIVISORS_SRC, ("int", "list[int]"))
+    sum_fp = compute_fingerprint(SUM_SRC, ("list[int]", "int"))
+    fragile_fp = list(divisors_fp)
+    fragile_fp[0] = "__raises__:ZeroDivisionError"
+
+    records = [
+        {
+            "iteration": 0,
+            "signature": ["int", "list[int]"],
+            "extracted_source": DIVISORS_SRC,
+            "input_value": None,
+            "gate_result": {
+                "accepted": True,
+                "stage": "completed",
+                "reason": None,
+                "value": None,
+                "duration_ms": 0.0,
+                "metadata": {},
+            },
+            "fingerprint": fragile_fp,
+        },
+        {
+            "iteration": 1,
+            "signature": ["list[int]", "int"],
+            "extracted_source": SUM_SRC,
+            "input_value": None,
+            "gate_result": {
+                "accepted": True,
+                "stage": "completed",
+                "reason": None,
+                "value": None,
+                "duration_ms": 0.0,
+                "metadata": {},
+            },
+            "fingerprint": sum_fp,
+        },
+    ]
+    with l1.open("w", encoding="utf-8") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec) + "\n")
+    append_to_index(
+        fp_path, index_key(("int", "list[int]"), fragile_fp), DIVISORS_SRC, 0
+    )
+    append_to_index(fp_path, index_key(("list[int]", "int"), sum_fp), SUM_SRC, 1)
+
+    compose_run(
+        l1,
+        l2,
+        [("int", "int"), ("int", "list[int]"), ("list[int]", "int")],
+    )
+    captured = capsys.readouterr()
+    # Filter log: 1 of 2 atoms excluded, 1 __raises__, 0 __bad_output_type__.
+    assert "filtered 1 of 2 L1 atoms as not composition-ready" in captured.out
+    assert "1 with __raises__" in captured.out
+    assert "0 with __bad_output_type__" in captured.out
+
+
+def test_compose_run_writes_failures_file(tmp_path: Path):
+    """Rejected compositions are appended to a .failures.jsonl alongside accepts."""
+    l1 = tmp_path / "l1.jsonl"
+    l2 = tmp_path / "l1.l2.jsonl"
+
+    # Two L1 atoms that compose into a fingerprint-duplicate of a third L1
+    # atom — that guarantees at least one rejection (layer_6 duplicate).
+    sigma_src = "def f(n):\n    return sum(i for i in range(1, abs(n) + 1) if n % i == 0)"
+    atoms = [
+        {"source": DIVISORS_SRC, "signature": ("int", "list[int]")},
+        {"source": SUM_SRC, "signature": ("list[int]", "int")},
+        {"source": sigma_src, "signature": ("int", "int")},
+    ]
+    _write_l1_log(l1, atoms)
+
+    compose_run(l1, l2, [("int", "int"), ("int", "list[int]"), ("list[int]", "int")])
+
+    failures_path = l2.with_suffix(".failures.jsonl")
+    assert failures_path.exists(), "failures file should be written"
+    records = [
+        json.loads(line) for line in failures_path.read_text().splitlines() if line.strip()
+    ]
+    assert records, "failures file should contain at least one record"
+    required = {
+        "atom_a",
+        "atom_b",
+        "composed_source",
+        "composed_signature",
+        "rejection_stage",
+        "rejection_reason",
+    }
+    for rec in records:
+        assert required <= set(rec.keys()), f"missing keys in {rec}"
+        assert "source" in rec["atom_a"] and "signature" in rec["atom_a"]
+        assert "source" in rec["atom_b"] and "signature" in rec["atom_b"]
+        assert isinstance(rec["composed_signature"], list)
+        assert rec["rejection_stage"] in {
+            "sandbox",
+            "layer_1",
+            "layer_2",
+            "layer_3",
+            "layer_4",
+            "layer_5",
+            "layer_6",
+            "novelty",
+            "canonical",
+            "extract_fail",
+        }
+    # At least one record should describe a layer_6 fingerprint-duplicate
+    # (the divisors ∘ sum ≡ sigma case).
+    assert any(rec["rejection_stage"] == "layer_6" for rec in records)
 
 
 def test_compose_run_rejects_duplicates_of_level1(tmp_path: Path):

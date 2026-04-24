@@ -124,6 +124,23 @@ def test_isinstance_sentence_appears_immediately_after_do_not_validate_sentence(
     assert no_validate_idx < isinstance_idx < builtins_idx
 
 
+def test_prompt_mentions_edge_case_hardening():
+    p = build_prompt("int", "int")
+    assert (
+        "Your function may receive empty lists, empty strings, empty dicts, "
+        "zero, negative numbers, or single-element inputs. Handle edge cases "
+        "gracefully — never raise an exception."
+    ) in p
+
+
+def test_edge_case_sentence_appears_after_isinstance_and_before_builtins():
+    p = build_prompt("list[int]", "int")
+    isinstance_idx = p.index("Never call isinstance")
+    edge_idx = p.index("Your function may receive empty lists")
+    builtins_idx = p.index("Allowed builtins only")
+    assert isinstance_idx < edge_idx < builtins_idx
+
+
 @pytest.mark.parametrize("inp,out", ACTIVE_SIGNATURES)
 def test_prompt_builds_for_every_active_signature(inp, out):
     p = build_prompt(inp, out)
