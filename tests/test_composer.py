@@ -12,6 +12,7 @@ from infinity_forge.composer import (
     compose_run,
     compose_source,
     extract_body,
+    extract_body_statements,
     extract_param_name,
     find_composable_pairs,
     is_composition_ready,
@@ -96,6 +97,69 @@ def test_compose_source_multi_statement_uses_nested_def():
     ast.parse(composed)
     assert "def _a(lst):" in composed
     assert "def _b(n):" in composed
+
+
+def test_nested_def_path_preserves_return_in_single_expr_atom():
+    # DIVISORS is single-expression; MULTI_STMT_SRC forces the nested-def
+    # path. The single-expr side must still carry ``return`` inside the
+    # nested def, or _a returns None and _b(None) crashes.
+    composed = compose_source(DIVISORS_SRC, "n", MULTI_STMT_SRC, "lst")
+    ast.parse(composed)
+    assert "def _a(n):" in composed
+    assert "def _b(lst):" in composed
+    # The single-expression atom's nested def must emit ``return``.
+    assert "return [i for i in range(1, abs(n) + 1) if n % i == 0]" in composed
+
+
+def test_nested_def_path_preserves_return_when_b_is_single_expr():
+    # Mirror image: A is multi-statement, B is single-expression.
+    composed = compose_source(MULTI_STMT_SRC, "lst", ABS_STR_SRC, "n")
+    # B's nested def body must include ``return str(abs(n))``.
+    assert "return str(abs(n))" in composed
+
+
+def test_extract_body_statements_preserves_return():
+    assert extract_body_statements(SUM_SRC) == "return sum(lst)"
+    assert extract_body_statements(DIVISORS_SRC) == (
+        "return [i for i in range(1, abs(n) + 1) if n % i == 0]"
+    )
+    # Multi-statement bodies unchanged by the statement form.
+    multi = extract_body_statements(MULTI_STMT_SRC)
+    assert "return total" in multi
+    assert "total = 0" in multi
+
+
+def test_nested_def_composition_returns_correct_value():
+    # divisors(n) ∘ sum_multi(lst) on 12 must yield 28, not None/crash.
+    composed = compose_source(DIVISORS_SRC, "n", MULTI_STMT_SRC, "lst")
+    result = sandbox.run_in_sandbox(composed, 12)
+    assert result["status"] == "ok", result
+    assert result["output"] == 28
+
+
+def test_nested_def_composition_not_none_false_positive():
+    # The false-positive case: _a returns a list, _b consumes a list
+    # and happens to tolerate None (via ``or []``). Pre-fix, _a returned
+    # None, _b saw None, ``None or []`` yielded [], sum([]) = 0 — a
+    # spurious "success" with the wrong answer. Post-fix, the actual
+    # list flows through and we get the real sum.
+    tolerant_sum = (
+        "def f(lst):\n"
+        "    items = lst or []\n"
+        "    total = 0\n"
+        "    for x in items:\n"
+        "        total = total + x\n"
+        "    return total\n"
+    )
+    composed = compose_source(DIVISORS_SRC, "n", tolerant_sum, "lst")
+    result = sandbox.run_in_sandbox(composed, 12)
+    assert result["status"] == "ok", result
+    # Correct answer is 28 (1+2+3+4+6+12). A None-driven fallback would
+    # give 0 — that's the bug this guards against.
+    assert result["output"] == 28, (
+        f"expected 28 from real divisors ∘ sum, got {result['output']} — "
+        "likely the pre-fix None fallback path"
+    )
 
 
 def test_compose_source_passes_cascade():

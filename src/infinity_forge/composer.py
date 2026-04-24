@@ -67,6 +67,19 @@ def extract_body(source: str) -> str:
     return "\n".join(ast.unparse(stmt) for stmt in body)
 
 
+def extract_body_statements(source: str) -> str:
+    """Return the function body as statement(s), preserving ``return``.
+
+    Unlike :func:`extract_body` (which strips ``return`` so the result
+    can be used as a lambda body), this form is always valid as the
+    body of a nested ``def``. A single ``return <expr>`` comes back as
+    ``return <expr>``; multi-statement bodies are unparsed verbatim.
+    """
+    tree = ast.parse(source)
+    func = tree.body[0]
+    return "\n".join(ast.unparse(stmt) for stmt in func.body)
+
+
 def _indent(text: str, spaces: int) -> str:
     pad = " " * spaces
     return "\n".join((pad + line) if line else line for line in text.split("\n"))
@@ -96,12 +109,14 @@ def compose_source(
             f"    return _b(_a({atom_a_param}))\n"
         )
 
+    nested_a = extract_body_statements(atom_a_source)
+    nested_b = extract_body_statements(atom_b_source)
     return (
         f"def f({atom_a_param}):\n"
         f"    def _a({atom_a_param}):\n"
-        f"{_indent(body_a, 8)}\n"
+        f"{_indent(nested_a, 8)}\n"
         f"    def _b({atom_b_param}):\n"
-        f"{_indent(body_b, 8)}\n"
+        f"{_indent(nested_b, 8)}\n"
         f"    return _b(_a({atom_a_param}))\n"
     )
 
