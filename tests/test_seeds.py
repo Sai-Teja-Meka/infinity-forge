@@ -16,6 +16,13 @@ REPRESENTATIVE_INPUTS: dict[tuple[str, str], object] = {
     ("int", "list[int]"): 12,
     ("dict", "int"): {"a": 1, "b": "hello"},
     ("list[str]", "list[str]"): ["bb", "a", "ccc"],
+    # Day 9 bridge seeds.
+    ("int", "str"): -7,
+    ("str", "list[str]"): "abc",
+    ("str", "list[int]"): "hi world foo",
+    ("list[int]", "str"): [1, 2, 3],
+    ("bool", "int"): True,
+    ("int", "dict"): 5,
 }
 
 
@@ -28,6 +35,16 @@ def test_seed_atoms_cover_the_three_weak_signatures():
     assert ("int", "list[int]") in sigs
     assert ("dict", "int") in sigs
     assert ("list[str]", "list[str]") in sigs
+
+
+def test_seed_atoms_cover_day9_bridge_signatures():
+    sigs = {tuple(s["signature"]) for s in SEED_ATOMS}
+    assert ("int", "str") in sigs
+    assert ("str", "list[str]") in sigs
+    assert ("str", "list[int]") in sigs
+    assert ("list[int]", "str") in sigs
+    assert ("bool", "int") in sigs
+    assert ("int", "dict") in sigs
 
 
 def test_every_seed_has_required_fields():
@@ -90,3 +107,65 @@ def test_list_str_to_list_str_seed_correct():
     result = sandbox.run_in_sandbox(seed["source"], ["bb", "a", "ccc"])
     assert result["status"] == "ok"
     assert result["output"] == ["a", "bb", "ccc"]
+
+
+def test_bool_probes_exist_with_twenty_values():
+    from infinity_forge.probes import PROBES
+    assert "bool" in PROBES
+    assert len(PROBES["bool"]) == 20
+
+
+def test_int_to_str_seed_correct():
+    seed = next(s for s in SEED_ATOMS if s["signature"] == ("int", "str"))
+    result = sandbox.run_in_sandbox(seed["source"], -7)
+    assert result["status"] == "ok"
+    assert result["output"] == "7"
+
+
+def test_str_to_list_str_seed_correct():
+    seed = next(s for s in SEED_ATOMS if s["signature"] == ("str", "list[str]"))
+    result = sandbox.run_in_sandbox(seed["source"], "abc")
+    assert result["status"] == "ok"
+    assert result["output"] == ["a", "b", "c"]
+
+
+def test_str_to_list_int_seed_correct():
+    seed = next(s for s in SEED_ATOMS if s["signature"] == ("str", "list[int]"))
+    result = sandbox.run_in_sandbox(seed["source"], "hi world foo")
+    assert result["status"] == "ok"
+    assert result["output"] == [2, 5, 3]
+
+
+def test_list_int_to_str_seed_correct():
+    seed = next(s for s in SEED_ATOMS if s["signature"] == ("list[int]", "str"))
+    result = sandbox.run_in_sandbox(seed["source"], [1, 2, 3])
+    assert result["status"] == "ok"
+    assert result["output"] == "123"
+
+
+def test_bool_to_int_seed_correct_true():
+    seed = next(s for s in SEED_ATOMS if s["signature"] == ("bool", "int"))
+    result = sandbox.run_in_sandbox(seed["source"], True)
+    assert result["status"] == "ok"
+    assert result["output"] == 1
+
+
+def test_bool_to_int_seed_correct_false():
+    seed = next(s for s in SEED_ATOMS if s["signature"] == ("bool", "int"))
+    result = sandbox.run_in_sandbox(seed["source"], False)
+    assert result["status"] == "ok"
+    assert result["output"] == 0
+
+
+def test_int_to_dict_seed_correct_on_5():
+    seed = next(s for s in SEED_ATOMS if s["signature"] == ("int", "dict"))
+    result = sandbox.run_in_sandbox(seed["source"], 5)
+    assert result["status"] == "ok"
+    assert result["output"] == {"0": 0, "1": 1, "2": 4, "3": 9, "4": 16}
+
+
+def test_int_to_dict_seed_caps_on_large_input():
+    seed = next(s for s in SEED_ATOMS if s["signature"] == ("int", "dict"))
+    result = sandbox.run_in_sandbox(seed["source"], 1_000_000)
+    assert result["status"] == "ok"
+    assert len(result["output"]) < 10

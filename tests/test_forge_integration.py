@@ -43,6 +43,15 @@ _SIG_SOURCES: dict[tuple[str, str], str] = {
     ("str", "str"): "def f(s):\n    return s + 'x'",
     ("dict", "int"): "def f(d):\n    return len(d)",
     ("dict", "list[str]"): "def f(d):\n    return sorted(d)",
+    # Day 9 bridge signatures — kept behaviorally distinct from the
+    # matching SEED_ATOMS entries so Layer 6 novelty does not dedupe
+    # mock-generator iterations against seeds.
+    ("int", "str"): "def f(n):\n    return str(n * 2)",
+    ("str", "list[str]"): "def f(s):\n    return [s, s]",
+    ("str", "list[int]"): "def f(s):\n    return [ord(c) for c in s]",
+    ("list[int]", "str"): "def f(lst):\n    return '-'.join(str(x) for x in lst)",
+    ("bool", "int"): "def f(b):\n    return 2 if b else 5",
+    ("int", "dict"): "def f(n):\n    return {'v': abs(n)}",
 }
 
 

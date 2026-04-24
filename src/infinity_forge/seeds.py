@@ -32,4 +32,37 @@ SEED_ATOMS: list[dict] = [
         "source": "def f(lst):\n    return sorted(lst, key=len)",
         "note": "sort strings by length",
     },
+    # Day 9 bridge seeds: one atom per new bridge signature so every
+    # cluster has a non-empty few-shot pool and the type graph is
+    # strongly connected from turn 0.
+    {
+        "signature": ("int", "str"),
+        "source": "def f(n):\n    return str(abs(n))",
+        "note": "string form of abs(n); bridges int -> str cluster",
+    },
+    {
+        "signature": ("str", "list[str]"),
+        "source": "def f(s):\n    return list(s)",
+        "note": "characters of s as a list; enables str -> list[str] -> str chains",
+    },
+    {
+        "signature": ("str", "list[int]"),
+        "source": "def f(s):\n    return [len(w) for w in s.split()]",
+        "note": "word-length list; bridges str into list[int] cluster",
+    },
+    {
+        "signature": ("list[int]", "str"),
+        "source": "def f(lst):\n    return ''.join(str(x) for x in lst)",
+        "note": "concatenated decimal repr; bridges list[int] back to str",
+    },
+    {
+        "signature": ("bool", "int"),
+        "source": "def f(b):\n    return 1 if b else 0",
+        "note": "bool -> {0,1}; makes bool non-terminal",
+    },
+    {
+        "signature": ("int", "dict"),
+        "source": "def f(n):\n    return {str(i): i * i for i in range(abs(n) % 10)}",
+        "note": "squares map capped at 9 entries; gives dict a second entry point",
+    },
 ]

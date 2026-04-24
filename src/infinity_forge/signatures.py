@@ -45,6 +45,14 @@ ACTIVE_SIGNATURES: list[tuple[str, str]] = [
     ("str", "str"),
     ("dict", "int"),
     ("dict", "list[str]"),
+    # Day 9 bridge signatures: make the type graph strongly connected so
+    # Level 2 composition can chain atoms across every type cluster.
+    ("int", "str"),
+    ("str", "list[str]"),
+    ("str", "list[int]"),
+    ("list[int]", "str"),
+    ("bool", "int"),
+    ("int", "dict"),
 ]
 
 _DESCRIPTIONS: dict[str, str] = {
