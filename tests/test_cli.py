@@ -53,3 +53,31 @@ def test_compose_log_override():
     parser = build_parser()
     args = parser.parse_args(["--compose", "--compose-log", "/tmp/x.jsonl"])
     assert args.compose_log == Path("/tmp/x.jsonl")
+
+
+def test_compose_l3_flag_parsed():
+    parser = build_parser()
+    args = parser.parse_args(["--compose-l3"])
+    assert args.compose_l3 is True
+
+
+def test_compose_l3_flag_defaults_to_false():
+    parser = build_parser()
+    args = parser.parse_args([])
+    assert args.compose_l3 is False
+
+
+def test_compose_l3_log_defaults_to_none():
+    parser = build_parser()
+    args = parser.parse_args(["--compose-l3"])
+    assert args.compose_l3_log is None
+
+
+def test_compose_l3_log_override():
+    from pathlib import Path
+
+    parser = build_parser()
+    args = parser.parse_args(
+        ["--compose-l3", "--compose-l3-log", "/tmp/x.l3.jsonl"]
+    )
+    assert args.compose_l3_log == Path("/tmp/x.l3.jsonl")

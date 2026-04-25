@@ -9,7 +9,9 @@ import pytest
 
 from infinity_forge import cascade, sandbox
 from infinity_forge.composer import (
+    _find_l3_pairs,
     compose_run,
+    compose_run_l3,
     compose_source,
     extract_body,
     extract_body_statements,
@@ -575,3 +577,247 @@ def test_compose_run_rejects_duplicates_of_level1(tmp_path: Path):
             assert tuple(rec["signature"]) != ("int", "int"), (
                 "composition should have been rejected as duplicate of L1 sigma"
             )
+
+
+# --- Level 3 composition --------------------------------------------------
+
+
+def _write_l2_log(path: Path, atoms: list[dict]) -> None:
+    """Write a minimal L2 log: one accepted record per atom, with fingerprint."""
+    from infinity_forge.novelty import (
+        append_to_index,
+        compute_fingerprint,
+        index_key,
+    )
+
+    fp_path = path.with_name(path.stem + ".fingerprints.jsonl")
+    with path.open("w", encoding="utf-8") as fh:
+        for i, a in enumerate(atoms):
+            sig = tuple(a["signature"])
+            src = a["source"]
+            fp = a.get("fingerprint") or compute_fingerprint(src, sig)
+            rec = {
+                "iteration": i,
+                "level": 2,
+                "signature": list(sig),
+                "extracted_source": src,
+                "input_value": None,
+                "gate_result": {
+                    "accepted": True,
+                    "stage": "completed",
+                    "reason": None,
+                    "value": None,
+                    "duration_ms": 0.0,
+                    "metadata": {},
+                },
+                "fingerprint": fp,
+                "components": [],
+            }
+            fh.write(json.dumps(rec) + "\n")
+            append_to_index(fp_path, index_key(sig, fp), src, i)
+
+
+SQUARE_SRC = "def f(n):\n    return n * n"
+INCR_SRC = "def f(n):\n    return n + 1"
+DOUBLE_SRC = "def f(n):\n    return n * 2"
+IDENTITY_SRC = "def f(n):\n    return n"
+
+
+def test_find_l3_pairs_enumerates_both_directions():
+    l1 = [
+        {"source": INCR_SRC, "signature": ("int", "int"), "fingerprint": ["x"]},
+    ]
+    l2 = [
+        {"source": SQUARE_SRC, "signature": ("int", "int"), "fingerprint": ["y"]},
+    ]
+    pairs = _find_l3_pairs(l1, l2, [("int", "int")])
+    sources = {(a["source"], b["source"]) for a, b, _ in pairs}
+    # Both (square, incr) and (incr, square) must appear.
+    assert (SQUARE_SRC, INCR_SRC) in sources, (
+        f"expected L2-inner → L1-outer; got {sources}"
+    )
+    assert (INCR_SRC, SQUARE_SRC) in sources, (
+        f"expected L1-inner → L2-outer; got {sources}"
+    )
+    assert len(pairs) == 2
+
+
+def test_find_l3_pairs_filters_by_active_signatures():
+    l1 = [
+        {"source": ABS_STR_SRC, "signature": ("int", "str"), "fingerprint": ["x"]},
+    ]
+    l2 = [
+        {"source": SQUARE_SRC, "signature": ("int", "int"), "fingerprint": ["y"]},
+    ]
+    # SQUARE(int→int) inner ∘ ABS_STR(int→str) outer would compose to
+    # (int, str), but the active list omits that signature, so the pair
+    # is filtered out. The reverse direction is type-incompatible
+    # (str ≠ int).
+    pairs = _find_l3_pairs(l1, l2, [("int", "int")])
+    assert pairs == []
+
+
+def test_find_l3_pairs_excludes_self_composition():
+    same = {"source": SQUARE_SRC, "signature": ("int", "int"), "fingerprint": ["x"]}
+    pairs = _find_l3_pairs([same], [same], [("int", "int")])
+    assert pairs == []
+
+
+def test_compose_run_l3_writes_three_function_chain(tmp_path: Path):
+    l1 = tmp_path / "l1.jsonl"
+    l2 = tmp_path / "l1.l2.jsonl"
+    l3 = tmp_path / "l1.l3.jsonl"
+
+    l1_atoms = [
+        {"source": INCR_SRC, "signature": ("int", "int")},
+        {"source": DOUBLE_SRC, "signature": ("int", "int")},
+    ]
+    _write_l1_log(l1, l1_atoms)
+    _write_l2_log(l2, [{"source": SQUARE_SRC, "signature": ("int", "int")}])
+
+    compose_run_l3(l1, l2, l3, [("int", "int")])
+
+    assert l3.exists()
+    lines = [json.loads(x) for x in l3.read_text().splitlines() if x.strip()]
+    assert lines, "expected at least one L3 atom"
+    rec = lines[0]
+    assert rec["level"] == 3
+    assert "components" in rec
+    assert len(rec["components"]) == 2
+    # The accepted source must execute correctly via the sandbox: the
+    # whole composition is a real three-function chain.
+    from infinity_forge import sandbox
+
+    result = sandbox.run_in_sandbox(rec["extracted_source"], 3)
+    assert result["status"] == "ok", result
+
+
+def test_compose_run_l3_components_cover_both_directions(tmp_path: Path):
+    """Across all accepted L3 atoms, both (L2, L1) and (L1, L2) appear."""
+    l1 = tmp_path / "l1.jsonl"
+    l2 = tmp_path / "l1.l2.jsonl"
+    l3 = tmp_path / "l1.l3.jsonl"
+
+    l1_atoms = [
+        {"source": INCR_SRC, "signature": ("int", "int")},
+        {"source": DOUBLE_SRC, "signature": ("int", "int")},
+    ]
+    _write_l1_log(l1, l1_atoms)
+    _write_l2_log(l2, [{"source": SQUARE_SRC, "signature": ("int", "int")}])
+
+    compose_run_l3(l1, l2, l3, [("int", "int")])
+
+    lines = [json.loads(x) for x in l3.read_text().splitlines() if x.strip()]
+    saw_l2_inner = False
+    saw_l1_inner = False
+    for rec in lines:
+        first_src = rec["components"][0]["source"]
+        if first_src == SQUARE_SRC:
+            saw_l2_inner = True
+        elif first_src in (INCR_SRC, DOUBLE_SRC):
+            saw_l1_inner = True
+    assert saw_l2_inner, f"no L3 atom had L2 as inner component; got {lines}"
+    assert saw_l1_inner, f"no L3 atom had L1 as inner component; got {lines}"
+
+
+def test_compose_run_l3_dedupes_against_level1(tmp_path: Path):
+    """An L3 candidate whose fingerprint matches an existing L1 atom is rejected."""
+    l1 = tmp_path / "l1.jsonl"
+    l2 = tmp_path / "l1.l2.jsonl"
+    l3 = tmp_path / "l1.l3.jsonl"
+
+    # incr is in L1; identity is the only L2 atom. Both compositions of
+    # the pair (identity, incr) and (incr, identity) yield n+1, whose
+    # fingerprint matches incr — so every L3 candidate must be rejected
+    # as a layer_6 fingerprint duplicate.
+    _write_l1_log(l1, [{"source": INCR_SRC, "signature": ("int", "int")}])
+    _write_l2_log(l2, [{"source": IDENTITY_SRC, "signature": ("int", "int")}])
+
+    compose_run_l3(l1, l2, l3, [("int", "int")])
+
+    if l3.exists():
+        lines = [json.loads(x) for x in l3.read_text().splitlines() if x.strip()]
+        assert lines == [], (
+            f"L3 candidates duplicating L1 atoms must be rejected; got {lines}"
+        )
+
+    failures_path = l3.with_suffix(".failures.jsonl")
+    assert failures_path.exists()
+    failures = [
+        json.loads(x) for x in failures_path.read_text().splitlines() if x.strip()
+    ]
+    # At least one rejection should be canonical-or-fingerprint duplicate
+    # of the L1 incr atom.
+    assert any(
+        rec["rejection_stage"] in {"layer_6", "canonical"} for rec in failures
+    ), f"expected canonical/layer_6 rejection vs L1; got {failures}"
+
+
+def test_compose_run_l3_dedupes_against_level2(tmp_path: Path):
+    """An L3 candidate whose fingerprint matches an existing L2 atom is rejected."""
+    l1 = tmp_path / "l1.jsonl"
+    l2 = tmp_path / "l1.l2.jsonl"
+    l3 = tmp_path / "l1.l3.jsonl"
+
+    # L1: identity. L2: square. The pair (identity, square) and
+    # (square, identity) both compute n*n — fingerprint matches the
+    # existing L2 square atom, so both L3 candidates must dedupe.
+    _write_l1_log(l1, [{"source": IDENTITY_SRC, "signature": ("int", "int")}])
+    _write_l2_log(l2, [{"source": SQUARE_SRC, "signature": ("int", "int")}])
+
+    compose_run_l3(l1, l2, l3, [("int", "int")])
+
+    if l3.exists():
+        lines = [json.loads(x) for x in l3.read_text().splitlines() if x.strip()]
+        assert lines == [], (
+            f"L3 candidates duplicating L2 atoms must be rejected; got {lines}"
+        )
+
+
+def test_compose_run_l3_filters_fragile_l2_atoms(tmp_path: Path):
+    """An L2 atom with __raises__ in its fingerprint must not enter any L3 pair."""
+    from infinity_forge.novelty import compute_fingerprint
+
+    l1 = tmp_path / "l1.jsonl"
+    l2 = tmp_path / "l1.l2.jsonl"
+    l3 = tmp_path / "l1.l3.jsonl"
+
+    _write_l1_log(l1, [{"source": INCR_SRC, "signature": ("int", "int")}])
+
+    # Inject __raises__ into the L2 atom's fingerprint. This is the only
+    # L2 atom, so once it's filtered out there are no L3 pairs at all.
+    square_fp = list(compute_fingerprint(SQUARE_SRC, ("int", "int")))
+    square_fp[0] = "__raises__:ValueError"
+    _write_l2_log(
+        l2,
+        [
+            {
+                "source": SQUARE_SRC,
+                "signature": ("int", "int"),
+                "fingerprint": square_fp,
+            }
+        ],
+    )
+
+    compose_run_l3(l1, l2, l3, [("int", "int")])
+
+    if l3.exists():
+        lines = [json.loads(x) for x in l3.read_text().splitlines() if x.strip()]
+        assert lines == [], (
+            f"fragile L2 atoms must be filtered from L3 enumeration; got {lines}"
+        )
+
+
+def test_compose_run_l3_logs_filter_lines_for_both_layers(tmp_path: Path, capsys):
+    """The filter-count diagnostic appears for both L1 and L2."""
+    l1 = tmp_path / "l1.jsonl"
+    l2 = tmp_path / "l1.l2.jsonl"
+    l3 = tmp_path / "l1.l3.jsonl"
+
+    _write_l1_log(l1, [{"source": INCR_SRC, "signature": ("int", "int")}])
+    _write_l2_log(l2, [{"source": SQUARE_SRC, "signature": ("int", "int")}])
+
+    compose_run_l3(l1, l2, l3, [("int", "int")])
+    captured = capsys.readouterr()
+    assert "[composer-l3] filtered 0 of 1 L1 atoms" in captured.out
+    assert "[composer-l3] filtered 0 of 1 L2 atoms" in captured.out

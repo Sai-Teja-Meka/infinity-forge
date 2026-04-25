@@ -41,6 +41,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Output path for the Level 2 log. Defaults to <log>.l2.jsonl.",
     )
+    parser.add_argument(
+        "--compose-l3",
+        action="store_true",
+        help="Run the Level 3 composition pass: compose each accepted L2 "
+             "atom with each accepted L1 atom in both directions. Mutually "
+             "exclusive with --iterations / --multi-model / --compose.",
+    )
+    parser.add_argument(
+        "--compose-l3-log",
+        type=Path,
+        default=None,
+        help="Output path for the Level 3 log. Defaults to <log>.l3.jsonl.",
+    )
     return parser
 
 
@@ -49,6 +62,9 @@ def main() -> None:
     args = parser.parse_args()
 
     from infinity_forge.signatures import ACTIVE_SIGNATURES
+
+    if args.compose and args.compose_l3:
+        parser.error("--compose and --compose-l3 are mutually exclusive")
 
     if args.compose:
         if args.multi_model:
@@ -59,6 +75,20 @@ def main() -> None:
             args.log.stem + ".l2.jsonl"
         )
         compose_run(args.log, compose_log, list(ACTIVE_SIGNATURES))
+        return
+
+    if args.compose_l3:
+        if args.multi_model:
+            parser.error("--compose-l3 is mutually exclusive with --multi-model")
+        from infinity_forge.composer import compose_run_l3
+
+        l2_log = args.compose_log or args.log.with_name(
+            args.log.stem + ".l2.jsonl"
+        )
+        l3_log = args.compose_l3_log or args.log.with_name(
+            args.log.stem + ".l3.jsonl"
+        )
+        compose_run_l3(args.log, l2_log, l3_log, list(ACTIVE_SIGNATURES))
         return
 
     n_iterations = 3 if args.sanity_check else args.iterations
