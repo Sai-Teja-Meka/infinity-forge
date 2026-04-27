@@ -1,4 +1,4 @@
-# ∞ Forge  Self-Compounding Verified Code Library
+# ∞ Forge - Self-Compounding Verified Code Library
 
 105 LLM-generated atoms compounded into 11,500 verified functions through mechanical composition, no LLM in the compounder, no hallucination in the output.
 
